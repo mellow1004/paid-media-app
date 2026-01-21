@@ -1,0 +1,17 @@
+Group → Campaign,Status,Current Budget (£),Spent (£),Current Remaining (£),Current Daily (£),Δ Budget (£),New Budget (£),New Remaining (£),New Daily (£),Notes
+AWS / Traffic → SI AWS Partner,Active,"£3,744.17",£478.46,"£3,265.71",£47.33,"−£1,306.28","£2,437.89","£1,959.43",£28.40,40% shift out (group)
+AWS / Traffic → SI VMware,Active,"£1,255.83",£160.48,"£1,095.35",£15.88,−£438.14,£817.69,£657.21,£9.52,
+AWS / Traffic / 2 / TL → TL Michel,Active,"£1,500.00",£320.80,"£1,179.20",£17.09,−£471.68,"£1,028.32",£707.52,£10.25,TL; paced to Dec 15
+AWS / LeadGen → SC E-Guide (Msg),Active,"£2,560.49",£297.35,"£2,263.14",£32.80,"plus £1,134.87","£3,695.36","£3,398.01",£49.25,Receives shift
+AWS / LeadGen → VMware Convo Ads,Active,"£2,439.51",£283.30,"£2,156.21",£31.25,"plus £1,081.24","£3,520.75","£3,237.45",£46.92,Receives shift
+Azure / Traffic → SI Azure Partner,Active,"£2,761.66",£256.81,"£2,504.85",£36.30,"−£1,001.94","£1,759.72","£1,502.91",£21.78,40% shift out
+Azure / LeadGen → Migration Treasure Map,Active,"£2,761.00",£146.61,"£2,614.39",£37.89,"plus £1,001.94","£3,762.94","£3,616.33",£52.52,Receives shift
+Google / Traffic → SI Google Cloud Partner,Active,"£3,888.00",£110.67,"£3,777.33",£54.73,"−£1,510.93","£2,377.07","£2,266.40",£32.84,40% shift out
+Google / LeadGen → Migration Treasure Map,Active,"£3,888.71",£411.19,"£3,477.52",£50.41,"plus £1,510.93","£5,399.64","£4,988.45",£72.29,Receives shift
+Hybrid / Traffic → TL Jari Lietzen (Engagement),Active,"£2,748.87","£1,172.87","£1,576.00",£78.80 (20 days),−£513.12,"£2,235.75","£1,062.88",£53.14 (20 days),Ends Oct 27
+Hybrid / Traffic → Sovereign Cloud (Traffic),Active,£251.13,£426.70,£−175.57,—,−£47.05,£204.08,£−222.62,—,Over-spent vs current alloc; will be covered by new group LB
+Hybrid / LeadGen → SC E-Guide (SC),Active,"£2,964.36",£396.63,"£2,567.73",£37.22,plus £553.62,"£3,517.98","£3,121.35",£45.22,Receives shift
+Hybrid / LeadGen → Convo Ad E-Guide,Active,£35.64,£10.57,£25.07,£0.36,plus £6.55,£42.19,£31.62,£0.46,Receives small share
+AgenticAI / Traffic → EU AI Act Webinar (SI),Completed,"£1,451.70","£1,451.70",£0.00,—,£0.00,"£1,451.70",£0.00,—,Completed
+AgenticAI / Traffic → Engagement TL Sander,Completed,"£1,548.30","£1,500.09",£48.21,—,£0.00,"£1,548.30",£48.21,—,Completed
+AgenticAI / LeadGen → EU AI Act Webinar,Completed,"£3,000.00",£917.03,"£2,082.97",—,£0.00,"£3,000.00","£2,082.97",—,Completed
