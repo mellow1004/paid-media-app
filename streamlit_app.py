@@ -1,118 +1,164 @@
 import re
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from datetime import date
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
-# ============================================================
-# APP CONFIGURATION
-# ============================================================
-st.set_page_config(page_title="Google Sheets Data Hub", page_icon="📊", layout="wide")
-st.title("Google Sheets Data Hub")
-
 
 # ============================================================
-# CONSTANTS / DEFAULTS
+# APP CONFIG
 # ============================================================
-HIERARCHY_COLS = ["Program", "Industry", "Channel", "Campaign", "Phase"]
-
-# Allocation logic is intentionally modular so we can plug in EQUAL_SPLIT/WEIGHTED later.
-ALLOCATION_METHODS = ("EQUAL_SPLIT", "WEIGHTED")
-
-# Platform constraints (extend as needed).
-MIN_DAILY_BY_CHANNEL = {
-    "LinkedIn": Decimal("10.00"),
-}
-
-# Canonical internal column set for the finance engine
-CANON_COLS = [
-    "Program",
-    "Industry",
-    "Channel",
-    "Campaign",
-    "Phase",
-    "start_date",
-    "end_date",
-    "total_budget_baseline",
-    "total_budget_whatif",
-    "spent_to_date",
-    "paused_days_total",
-    "paused_days_to_date",
-    "CPM",
-    "CTR",
-    "CPL",
-    "__source_file",
-    "__parse_error",
-]
-
-# Flexible column mapping (user-provided variants + common normalized forms)
-START_DATE_ALIASES = ["start_date", "start", "startdatum", "period_start"]
-END_DATE_ALIASES = ["end_date", "end", "slutdatum", "period_end"]
-TOTAL_BUDGET_ALIASES = ["total_budget", "budget", "planned_spend"]
-TOTAL_SPENT_ALIASES = ["spent_to_date", "total_spent", "spend", "amount_spent", "cost", "spent"]
+st.set_page_config(page_title="Brightvision Ads Insights", page_icon="📊", layout="wide")
 
 
 # ============================================================
-# UTILITIES (deterministic rounding + parsing)
+# BRAND / THEME
 # ============================================================
-def _round2(x: Decimal) -> Decimal:
-    """Deterministic 2-decimal rounding (banking bugs avoided via HALF_UP)."""
-    return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+BV_RED = "#E2231A"
+BG = "#FFFFFF"
+TEXT = "#0B0F19"
+MUTED = "#6B7280"
+CARD_BG = "#FFFFFF"
+BORDER = "rgba(15, 23, 42, 0.10)"
+SHADOW = "0 1px 2px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.06)"
 
 
-def _to_decimal(value: object) -> Optional[Decimal]:
-    if value is None or (isinstance(value, float) and pd.isna(value)) or (isinstance(value, str) and value.strip() == ""):
-        return None
-    try:
-        # Accept common formats like "1,234.56" or "1 234,56"
-        s = str(value).strip()
-        s = s.replace(" ", "")
-        # If comma is used as decimal separator and dot not present, swap.
-        if "," in s and "." not in s:
-            s = s.replace(",", ".")
-        # Strip currency symbols.
-        s = re.sub(r"[^\d\.\-]", "", s)
-        if s in ("", "-", ".", "-."):
-            return None
-        return Decimal(s)
-    except (InvalidOperation, ValueError):
-        return None
+def inject_css():
+    st.markdown(
+        f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@600;700&display=swap');
+
+html, body, [class*="css"] {{
+  font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: {TEXT};
+}}
+h1, h2, h3, h4, h5, h6 {{
+  font-family: 'Space Grotesk', system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  letter-spacing: -0.02em;
+}}
+
+/* Sidebar sizing */
+section[data-testid="stSidebar"] {{
+  width: 256px !important;
+}}
+section[data-testid="stSidebar"] > div {{
+  background: {BG};
+  border-right: 1px solid {BORDER};
+}}
+
+/* Remove Streamlit default top padding */
+.block-container {{
+  padding-top: 1.6rem;
+  padding-bottom: 3rem;
+}}
+
+/* Cards */
+.bv-card {{
+  background: {CARD_BG};
+  border: 1px solid {BORDER};
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: {SHADOW};
+}}
+.bv-kpi-label {{
+  font-size: 12px;
+  color: {MUTED};
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}}
+.bv-kpi-value {{
+  font-size: 28px;
+  font-weight: 700;
+  margin-top: 6px;
+}}
+.bv-pill {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid {BORDER};
+  background: rgba(226, 35, 26, 0.08);
+  color: {BV_RED};
+  font-size: 12px;
+  font-weight: 700;
+}}
+.bv-nav a {{
+  display: block;
+  padding: 10px 12px;
+  border-radius: 12px;
+  color: {TEXT};
+  text-decoration: none;
+  border: 1px solid transparent;
+}}
+.bv-nav a:hover {{
+  background: rgba(2, 6, 23, 0.04);
+}}
+.bv-nav a.active {{
+  background: rgba(226, 35, 26, 0.08);
+  border-color: rgba(226, 35, 26, 0.22);
+  color: {BV_RED};
+  font-weight: 700;
+}}
+.bv-progress {{
+  height: 10px;
+  background: rgba(2, 6, 23, 0.06);
+  border-radius: 999px;
+  overflow: hidden;
+}}
+.bv-progress > span {{
+  display: block;
+  height: 100%;
+  background: {BV_RED};
+}}
+.bv-badge {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}}
+.bv-badge-red {{
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.25);
+  color: rgb(185, 28, 28);
+}}
+.bv-badge-yellow {{
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(245, 158, 11, 0.25);
+  color: rgb(161, 98, 7);
+}}
+.bv-muted {{
+  color: {MUTED};
+}}
+</style>
+""",
+        unsafe_allow_html=True,
+    )
 
 
-def series_to_cents(series: pd.Series) -> pd.Series:
-    """
-    Convert a numeric series to integer cents (Int64) with deterministic rounding.
-    This is the key for making parent totals exactly equal sum(children).
-    """
-    def _one(v: object) -> Optional[int]:
-        d = _to_decimal(v)
-        if d is None:
-            return None
-        d2 = _round2(d)
-        return int(d2 * 100)
-
-    return series.apply(_one).astype("Int64")
+inject_css()
 
 
-def cents_to_money(cents: pd.Series) -> pd.Series:
-    # Keep display as 2-decimal strings to avoid float artifacts.
-    def _fmt(v: object) -> Optional[str]:
-        if v is None or (isinstance(v, float) and pd.isna(v)) or (isinstance(v, pd._libs.missing.NAType)):
-            return None
-        return f"{Decimal(int(v)) / Decimal(100):.2f}"
-
-    return cents.apply(_fmt)
-
-
-def parse_date_col(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce").dt.date
-
-
-def safe_int(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").fillna(0).astype("int64")
+# ============================================================
+# DATA: LOAD LOCAL CSVs + FLEXIBLE SCHEMA MAPPING
+# ============================================================
+START_DATE_ALIASES = ["start_date", "start", "startdatum", "period_start", "start_date_", "startdate"]
+END_DATE_ALIASES = ["end_date", "end", "slutdatum", "period_end", "end_date_", "enddate"]
+BUDGET_ALIASES = ["total_budget", "budget", "total_budget_", "planned_spend", "lifetime_budget", "current_budget", "current_budget_total", "current_total", "assigned_budget"]
+SPENT_ALIASES = ["total_spent", "spent_to_date", "spent", "spend", "amount_spent", "cost", "current_spend", "current_budget_utilisation"]
+STATUS_ALIASES = ["status", "current_status", "off_on"]
+GROUP_ALIASES = ["group", "campaign_group_name", "campaign_group", "campaign_group_budget", "campaign_group_name_"]
+CAMPAIGN_ALIASES = ["campaign_name", "campaign"]
 
 
 def normalize_colname(name: str) -> str:
@@ -123,1144 +169,574 @@ def normalize_colname(name: str) -> str:
     return s
 
 
-def coalesce_first(*values: object) -> Optional[object]:
-    for v in values:
-        if v is None:
-            continue
-        if isinstance(v, float) and pd.isna(v):
-            continue
-        if isinstance(v, str) and v.strip() == "":
-            continue
-        return v
-    return None
-
-
 def first_existing_col(df: pd.DataFrame, candidates: list[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
     return None
 
-def col_as_1d_series(df: pd.DataFrame, col: Optional[str], default: object = None) -> pd.Series:
-    """
-    Safely extract a column as a 1D Series even if duplicate column names exist.
-    In pandas, df["col"] returns a DataFrame when there are duplicate column names.
-    """
+
+def col_as_1d(df: pd.DataFrame, col: Optional[str], default: object = None) -> pd.Series:
     if col is None or col not in df.columns:
         return pd.Series([default] * len(df), index=df.index)
-
-    sel = df.loc[:, col]  # can be Series OR DataFrame (if duplicate col names)
+    sel = df.loc[:, col]
     if isinstance(sel, pd.DataFrame):
         if sel.shape[1] == 0:
             return pd.Series([default] * len(df), index=df.index)
-        # take the first duplicate column deterministically
         return sel.iloc[:, 0].squeeze()
-
-    # sel is a Series
     return sel.squeeze()
 
 
-def ensure_1d(obj: object, index: pd.Index, default: object = None) -> pd.Series:
-    """
-    Force arbitrary objects into a 1D Series aligned to `index`.
-    """
-    if obj is None:
-        return pd.Series([default] * len(index), index=index)
-    if isinstance(obj, pd.Series):
-        return obj.reindex(index).squeeze()
-    if isinstance(obj, pd.DataFrame):
-        if obj.shape[1] == 0:
-            return pd.Series([default] * len(index), index=index)
-        return obj.iloc[:, 0].reindex(index).squeeze()
-    # scalar
-    return pd.Series([obj] * len(index), index=index)
+def parse_date(series: pd.Series) -> pd.Series:
+    return pd.to_datetime(series, errors="coerce").dt.date
 
 
-def drop_duplicate_header_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Some source exports repeat header rows inside the data.
-    We drop any row that matches its column names for a majority of columns.
-    """
-    if df.empty:
-        return df
-
-    cols = list(df.columns)
-    cols_l = [str(c).strip().lower() for c in cols]
-
-    def is_header_row(row: pd.Series) -> bool:
-        matches = 0
-        for c, cl in zip(cols, cols_l):
-            v = row.get(c, "")
-            vs = str(v).strip().lower()
-            if vs == cl and cl != "":
-                matches += 1
-        # at least 2 columns and at least half the columns must match
-        return matches >= max(2, int(len(cols) * 0.5))
-
-    mask = df.apply(is_header_row, axis=1)
-    return df.loc[~mask].reset_index(drop=True)
+def round2(x: Decimal) -> Decimal:
+    return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-# ============================================================
-# DOMAIN MODEL (optional: helps keep logic readable)
-# ============================================================
-@dataclass(frozen=True)
-class ScenarioConfig:
-    name: str
-    budget_col: str
+def to_decimal(value: object) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    s = str(value).strip()
+    if s == "":
+        return None
+    try:
+        s = s.replace(" ", "")
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+        s = re.sub(r"[^\d\.\-]", "", s)
+        if s in ("", "-", ".", "-."):
+            return None
+        return Decimal(s)
+    except (InvalidOperation, ValueError):
+        return None
 
 
-def infer_scenario_columns(df: pd.DataFrame) -> list[ScenarioConfig]:
-    """
-    Support both:
-    - A single column: total_budget
-    - Dual columns: total_budget_baseline / total_budget_whatif
-    """
-    cols = set(df.columns)
-    if {"total_budget_baseline", "total_budget_whatif"}.issubset(cols):
-        return [
-            ScenarioConfig("Baseline", "total_budget_baseline"),
-            ScenarioConfig("What-if", "total_budget_whatif"),
-        ]
-    if "total_budget" in cols:
-        return [
-            ScenarioConfig("Baseline", "total_budget"),
-            ScenarioConfig("What-if", "total_budget"),
-        ]
-    return []
+def series_to_cents(series: pd.Series) -> pd.Series:
+    def _one(v: object) -> int:
+        d = to_decimal(v)
+        if d is None:
+            return 0
+        return int(round2(d) * 100)
+
+    return series.apply(_one).astype("int64")
 
 
-# ============================================================
-# DATA LOADING (local CSVs)
-# ============================================================
 @st.cache_data(ttl=300)
-def load_local_budget_csvs() -> pd.DataFrame:
-    """
-    Load all CSV files in the project directory matching:
-      'Copy of Budgets*.csv'
-    Then concatenate them into a single DataFrame.
-    """
+def load_all_csvs() -> pd.DataFrame:
     base_dir = Path(__file__).resolve().parent
     paths = sorted(base_dir.glob("Copy of Budgets*.csv"))
-
     if not paths:
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
     for p in paths:
-        try:
-            df = read_csv_with_header_detection(p)
-            df["__source_file"] = p.name
-            frames.append(df)
-        except Exception:
-            # Keep going if one file is malformed; we show it in the UI later.
-            frames.append(pd.DataFrame({"__source_file": [p.name], "__load_error": ["failed_to_parse"]}))
-
+        df = read_csv_with_header_detection(p)
+        df["__source_file"] = p.name
+        frames.append(df)
     combined = pd.concat(frames, ignore_index=True, sort=False)
     combined = drop_duplicate_header_rows(combined)
     return combined
 
 
 def read_csv_with_header_detection(path: Path) -> pd.DataFrame:
-    """
-    Handles files that start with a few blank rows before the real header.
-    We find the first "header-like" line and read from there.
-    """
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
-
     header_idx = 0
     for i, line in enumerate(lines):
-        # skip empty-ish lines
-        if line.strip() == "":
+        if line.strip() == "" or set(line.strip()) <= {","}:
             continue
-        if set(line.strip()) <= {","}:
-            continue
-        # header-like: contains commas + at least one alphabetic character
         if "," in line and re.search(r"[A-Za-z]", line):
             header_idx = i
             break
-
     df = pd.read_csv(path, skiprows=header_idx, header=0)
-    # drop fully empty columns that sometimes appear from trailing commas
     df = df.dropna(axis=1, how="all")
-    # If there are duplicate column names, keep them (pandas allows) but downstream code must
-    # be robust. We still strip whitespace here to reduce accidental dupes.
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
-def parse_local_data_to_canonical(raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert heterogeneous local CSV formats into one canonical schema:
-      Program, Industry, Channel, Campaign, Phase,
-      start_date, end_date,
-      total_budget_baseline, total_budget_whatif,
-      spent_to_date,
-      paused_days_total, paused_days_to_date,
-      CPM, CTR, CPL
-    """
-    if raw.empty:
-        return raw
-
-    frames: list[pd.DataFrame] = []
-    parse_errors: list[dict[str, object]] = []
-
-    # Work per-source-file because different files have different schemas.
-    for source, df_src in raw.groupby("__source_file", dropna=False):
-        try:
-            df = df_src.copy()
-
-            # Normalize column names (but keep originals accessible via df.columns in df_src if needed).
-            colmap = {c: normalize_colname(c) for c in df.columns}
-            df = df.rename(columns=colmap)
-
-            cols = set(df.columns)
-
-            def seg_at(segs_df: pd.DataFrame, idx: int) -> pd.Series:
-                if segs_df.shape[1] > idx:
-                    return segs_df.iloc[:, idx].fillna("").astype(str)
-                return pd.Series([""] * len(segs_df), index=segs_df.index, dtype="string")
-
-            # Map synonyms to internal names if present
-            start_col = first_existing_col(df, START_DATE_ALIASES)
-            end_col = first_existing_col(df, END_DATE_ALIASES)
-            budget_col = first_existing_col(df, TOTAL_BUDGET_ALIASES)
-            spent_col_syn = first_existing_col(df, TOTAL_SPENT_ALIASES)
-
-            if "start_date" not in df.columns and start_col is not None:
-                df["start_date"] = df[start_col]
-            if "end_date" not in df.columns and end_col is not None:
-                df["end_date"] = df[end_col]
-            if "total_budget" not in df.columns and budget_col is not None:
-                df["total_budget"] = df[budget_col]
-            if "spent_to_date" not in df.columns and spent_col_syn is not None:
-                df["spent_to_date"] = df[spent_col_syn]
-
-            # Format A: "Group → Campaign" with budgets/spend/remaining (Sheet4)
-            if "group_to_campaign" in cols and any(c.startswith("current_budget") for c in cols):
-                group_col = "group_to_campaign"
-
-                # Identify budget/spend columns (best-effort)
-                budget_current_col = coalesce_first(
-                    "current_budget",
-                    next((c for c in df.columns if c.startswith("current_budget")), None),
-                )
-                spent_col = coalesce_first(
-                    "spent_to_date",
-                    "spent",
-                    next((c for c in df.columns if c.startswith("spent")), None),
-                )
-                new_budget_col = coalesce_first(
-                    "new_budget",
-                    next((c for c in df.columns if c.startswith("new_budget")), None),
-                )
-
-                # Split hierarchy from the path.
-                # Example: "AWS / Traffic → SI AWS Partner"
-                parts = df[group_col].astype(str).str.split(r"\s*[→>]\s*", n=1, expand=True)
-                group_path = parts.iloc[:, 0].fillna("").astype(str)
-
-                # IMPORTANT: parts does not always have a second column.
-                if getattr(parts, "shape", (0, 0))[1] > 1:
-                    second = parts.iloc[:, 1].fillna("").astype(str)
-                    campaign_name = second.where(second.str.strip() != "", group_path)
-                else:
-                    campaign_name = group_path
-
-                segs = group_path.str.split(r"\s*/\s*", expand=True)
-                program = seg_at(segs, 0)
-                industry = seg_at(segs, 1)
-                channel = seg_at(segs, 2)
-
-                canon = pd.DataFrame(
-                    {
-                        "Program": program,
-                        "Industry": industry,
-                        "Channel": channel,
-                        "Campaign": campaign_name,
-                        "Phase": "",
-                        "start_date": df.get("start_date", None),
-                        "end_date": df.get("end_date", None),
-                        "total_budget_baseline": (
-                            df.get("total_budget", None)
-                            if "total_budget" in df.columns
-                            else (df[budget_current_col] if (budget_current_col in df.columns) else None)
-                        ),
-                        "total_budget_whatif": (
-                            df[new_budget_col]
-                            if (new_budget_col in df.columns)
-                            else (
-                                df.get("total_budget", None)
-                                if "total_budget" in df.columns
-                                else (df[budget_current_col] if (budget_current_col in df.columns) else None)
-                            )
-                        ),
-                        "spent_to_date": df[spent_col] if (spent_col in df.columns) else None,
-                        "paused_days_total": 0,
-                        "paused_days_to_date": 0,
-                        "CPM": None,
-                        "CTR": None,
-                        "CPL": None,
-                        "__source_file": source,
-                        "__parse_error": None,
-                    }
-                )
-                frames.append(canon)
-                continue
-
-            # Format B: detailed campaign export with start/end and spend (e.g. "december 15th from doc.csv")
-            if {"campaign_group_name", "campaign_name"}.issubset(cols) and (
-                ("spent" in cols) or ("spent_to_date" in cols) or ("spend" in cols) or ("cost" in cols) or ("amount_spent" in cols)
-            ):
-                group_path = df.get("campaign_group_name", pd.Series([""] * len(df), index=df.index)).astype(str)
-                campaign_name = df.get("campaign_name", pd.Series([""] * len(df), index=df.index)).astype(str)
-
-                # Heuristic: derive Program/Industry/Channel from group path segments split by " / " or " | "
-                segs = group_path.str.split(r"\s*/\s*|\s*\|\s*", expand=True)
-                program = seg_at(segs, 0)
-                industry = seg_at(segs, 1)
-                channel = seg_at(segs, 2)
-
-                canon = pd.DataFrame(
-                    {
-                        "Program": program,
-                        "Industry": industry,
-                        "Channel": channel,
-                        "Campaign": campaign_name,
-                        "Phase": "",
-                        "start_date": df.get("start_date", None),
-                        "end_date": df.get("end_date", None),
-                        "total_budget_baseline": df.get("total_budget", None),
-                        "total_budget_whatif": df.get("total_budget", None),
-                        "spent_to_date": df.get("spent_to_date", df.get("spent", None)),
-                        "paused_days_total": 0,
-                        "paused_days_to_date": 0,
-                        "CPM": df.get("cpm", None),
-                        "CTR": df.get("ctr", None),
-                        "CPL": df.get("cpl", None),
-                        "__source_file": source,
-                        "__parse_error": None,
-                    }
-                )
-                frames.append(canon)
-                continue
-
-            # Format C: planning file with end date and new daily budget (e.g. "New calculations 16 DECEMBER .csv")
-            if {"campaign_group", "campaign_name", "the_end_date"}.issubset(cols):
-                group_path = df.get("campaign_group", pd.Series([""] * len(df), index=df.index)).astype(str)
-                campaign_name = df.get("campaign_name", pd.Series([""] * len(df), index=df.index)).astype(str)
-                segs = group_path.str.split(r"\s*/\s*|\s*\|\s*", expand=True)
-                program = seg_at(segs, 0)
-                industry = seg_at(segs, 1)
-                channel = seg_at(segs, 2)
-
-                canon = pd.DataFrame(
-                    {
-                        "Program": program,
-                        "Industry": industry,
-                        "Channel": channel,
-                        "Campaign": campaign_name,
-                        "Phase": "",
-                        "start_date": df.get("start_date", None),
-                        "end_date": df.get("the_end_date", None),
-                        "total_budget_baseline": None,
-                        "total_budget_whatif": None,
-                        "spent_to_date": None,
-                        "paused_days_total": 0,
-                        "paused_days_to_date": 0,
-                        "CPM": None,
-                        "CTR": None,
-                        "CPL": df.get("cpl", None),
-                        "__source_file": source,
-                        "__parse_error": None,
-                    }
-                )
-                frames.append(canon)
-                continue
-
-            # Unknown format: ignore (still visible in raw preview)
-            continue
-        except Exception as e:
-            parse_errors.append({"__source_file": source, "__parse_error": f"{type(e).__name__}: {e}"})
-            continue
-
-    if not frames:
-        # Still return a DataFrame that can be inspected in the UI without crashing.
-        out_err = pd.DataFrame(parse_errors) if parse_errors else pd.DataFrame()
-        # Ensure canonical columns always exist (avoid KeyError downstream)
-        for c in CANON_COLS:
-            if c not in out_err.columns:
-                out_err[c] = None
-        # Default dates to today if missing
-        today_d = pd.Timestamp.today().date()
-        out_err["start_date"] = out_err["start_date"].fillna(today_d)
-        out_err["end_date"] = out_err["end_date"].fillna(today_d)
-        return out_err[CANON_COLS]
-
-    out = pd.concat(frames, ignore_index=True, sort=False)
-    out = drop_duplicate_header_rows(out)
-    # Ensure canonical columns always exist (avoid KeyError downstream)
-    for c in CANON_COLS:
-        if c not in out.columns:
-            out[c] = None
-
-    # Default dates to today if missing
-    today_d = pd.Timestamp.today().date()
-    out["start_date"] = out["start_date"].fillna(today_d)
-    out["end_date"] = out["end_date"].fillna(today_d)
-
-    if parse_errors:
-        # Keep parse errors available in the UI (does not affect finance calcs)
-        err_df = pd.DataFrame(parse_errors)
-        for c in CANON_COLS:
-            if c not in err_df.columns:
-                err_df[c] = None
-        err_df["start_date"] = err_df["start_date"].fillna(today_d)
-        err_df["end_date"] = err_df["end_date"].fillna(today_d)
-        out = pd.concat([out, err_df[CANON_COLS]], ignore_index=True, sort=False)
-    return out[CANON_COLS]
-
-
-# ============================================================
-# CORE FINANCIAL CALCS (pandas-first)
-# ============================================================
-def apply_allocation_logic(df: pd.DataFrame, method: str) -> pd.DataFrame:
-    """
-    Placeholder: later we can implement EQUAL_SPLIT/WEIGHTED allocations.
-    For now, it returns df unchanged.
-    """
-    _ = method  # reserved
-    return df
-
-
-def compute_financials(
-    df: pd.DataFrame,
-    scenario_budget_col: str,
-    today: pd.Timestamp,
-) -> pd.DataFrame:
-    """
-    Compute leaf-level campaign/phase metrics, then allow aggregation to keep
-    parent totals matching sum(children).
-    """
-    out = df.copy()
-
-    # Hierarchy normalization
-    for c in HIERARCHY_COLS:
-        if c not in out.columns:
-            out[c] = ""
-        out[c] = out[c].astype(str).fillna("").replace("nan", "")
-
-    # Dates
-    if "start_date" not in out.columns:
-        out["start_date"] = pd.Timestamp(today).date()
-    if "end_date" not in out.columns:
-        out["end_date"] = pd.Timestamp(today).date()
-    out["start_date"] = parse_date_col(out["start_date"])
-    out["end_date"] = parse_date_col(out["end_date"])
-
-    # Pause inputs (optional)
-    # paused_days_total: total paused days over campaign lifetime
-    # paused_days_to_date: paused days already elapsed as of today
-    if "paused_days_total" not in out.columns:
-        out["paused_days_total"] = 0
-    if "paused_days_to_date" not in out.columns:
-        out["paused_days_to_date"] = 0
-    out["paused_days_total"] = safe_int(out["paused_days_total"]).clip(lower=0)
-    out["paused_days_to_date"] = safe_int(out["paused_days_to_date"]).clip(lower=0)
-
-    # Money columns (stored as cents to enforce exact sum invariants)
-    out["total_budget_cents"] = series_to_cents(out[scenario_budget_col]).fillna(0).astype("int64")
-    out["spent_to_date_cents"] = series_to_cents(out["spent_to_date"]).fillna(0).astype("int64")
-
-    # remaining_budget = total_budget - spent_to_date
-    out["remaining_budget_cents"] = (out["total_budget_cents"] - out["spent_to_date_cents"]).clip(lower=0)
-
-    # Day math
-    # total_days = inclusive days between start and end (if both valid)
-    start_dt = pd.to_datetime(out["start_date"], errors="coerce")
-    end_dt = pd.to_datetime(out["end_date"], errors="coerce")
-    total_days = (end_dt - start_dt).dt.days + 1
-    out["total_days"] = total_days.fillna(0).astype("int64").clip(lower=0)
-
-    out["active_days_total"] = (out["total_days"] - out["paused_days_total"]).clip(lower=0)
-
-    # elapsed days up to today (inclusive) capped to campaign window
-    today_date = pd.to_datetime(today).normalize()
-    effective_end = pd.to_datetime(out["end_date"], errors="coerce").fillna(today_date)
-    effective_start = pd.to_datetime(out["start_date"], errors="coerce").fillna(today_date)
-    capped_today = pd.Series([today_date] * len(out), index=out.index)
-    elapsed_end = pd.concat([capped_today, effective_end], axis=1).min(axis=1)
-    elapsed_start = effective_start
-    elapsed_days = (elapsed_end - elapsed_start).dt.days + 1
-    out["elapsed_days"] = elapsed_days.fillna(0).astype("int64").clip(lower=0)
-
-    out["elapsed_active_days"] = (out["elapsed_days"] - out["paused_days_to_date"]).clip(lower=0)
-    out["remaining_active_days"] = (out["active_days_total"] - out["elapsed_active_days"]).clip(lower=0)
-
-    # required_daily = remaining_budget / remaining_active_days
-    # Keep as Decimal-ish string with deterministic rounding for display.
-    def _required_daily_str(row) -> Optional[str]:
-        rad = int(row["remaining_active_days"])
-        if rad <= 0:
-            return None
-        cents = int(row["remaining_budget_cents"])
-        val = Decimal(cents) / Decimal(100) / Decimal(rad)
-        return f"{_round2(val):.2f}"
-
-    out["required_daily"] = out.apply(_required_daily_str, axis=1)
-
-    # Platform min daily constraint
-    def _min_daily(channel: str) -> Optional[Decimal]:
-        return MIN_DAILY_BY_CHANNEL.get(channel)
-
-    out["min_daily"] = out["Channel"].apply(_min_daily).apply(lambda d: f"{d:.2f}" if d is not None else None)
-
-    def _min_daily_violation(row) -> bool:
-        md = _min_daily(str(row["Channel"]))
-        if md is None:
-            return False
-        if row["required_daily"] is None:
-            return False
-        try:
-            req = Decimal(str(row["required_daily"]))
-        except InvalidOperation:
-            return False
-        return req < md
-
-    out["min_daily_violation"] = out.apply(_min_daily_violation, axis=1)
-
-    # Forecast engine (optional inputs)
-    # If CPM & CTR provided: impressions = (spend / CPM) * 1000 ; clicks = impressions * CTR
-    # If CPL provided: leads = spend / CPL
-    for col in ("CPM", "CTR", "CPL"):
-        if col not in out.columns:
-            out[col] = None
-
-    out["CPM_dec"] = out["CPM"].apply(_to_decimal)
-    out["CTR_dec"] = out["CTR"].apply(_to_decimal)
-    out["CPL_dec"] = out["CPL"].apply(_to_decimal)
-
-    # Use projected spend = total budget (can be swapped later with forecasted spend)
-    out["projected_spend_dec"] = out["total_budget_cents"].apply(lambda c: Decimal(int(c)) / Decimal(100))
-
-    # forecast_leads
-    def _forecast_leads(row) -> Optional[str]:
-        cpl = row["CPL_dec"]
-        if cpl is None or cpl <= 0:
-            return None
-        leads = row["projected_spend_dec"] / cpl
-        return f"{_round2(leads):.2f}"
-
-    out["forecast_leads"] = out.apply(_forecast_leads, axis=1)
-
-    # forecast_impressions / forecast_clicks
-    def _forecast_impressions(row) -> Optional[str]:
-        cpm = row["CPM_dec"]
-        if cpm is None or cpm <= 0:
-            return None
-        imps = (row["projected_spend_dec"] / cpm) * Decimal(1000)
-        # impressions are typically integer-like, but we keep 2 decimals deterministically
-        return f"{_round2(imps):.2f}"
-
-    def _forecast_clicks(row) -> Optional[str]:
-        imps_str = _forecast_impressions(row)
-        ctr = row["CTR_dec"]
-        if imps_str is None or ctr is None:
-            return None
-        try:
-            imps = Decimal(imps_str)
-        except InvalidOperation:
-            return None
-        clicks = imps * ctr
-        return f"{_round2(clicks):.2f}"
-
-    out["forecast_impressions"] = out.apply(_forecast_impressions, axis=1)
-    out["forecast_clicks"] = out.apply(_forecast_clicks, axis=1)
-
-    # Pacing
-    # expected_spend_to_date = total_budget * elapsed_active_days / active_days_total
-    def _expected_spend_to_date_cents(row) -> int:
-        ad = int(row["active_days_total"])
-        if ad <= 0:
-            return 0
-        elapsed = int(row["elapsed_active_days"])
-        total = int(row["total_budget_cents"])
-        # deterministic prorate in cents, rounding HALF_UP
-        val = (Decimal(total) * Decimal(elapsed) / Decimal(ad)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        return int(val)
-
-    out["expected_spend_to_date_cents"] = out.apply(_expected_spend_to_date_cents, axis=1).astype("int64")
-
-    def _pacing_ratio(row) -> Optional[str]:
-        expected = int(row["expected_spend_to_date_cents"])
-        actual = int(row["spent_to_date_cents"])
-        if expected <= 0:
-            return None
-        ratio = Decimal(actual) / Decimal(expected)
-        return f"{_round2(ratio):.2f}"
-
-    out["pacing_ratio"] = out.apply(_pacing_ratio, axis=1)
-
-    return out
-
-
-def aggregate_to_campaign(df_leaf: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate Phase rows into Campaign rows.
-    Parent totals are exact sums of children because budgets/spend are in integer cents.
-    """
-    group_cols = ["Program", "Industry", "Channel", "Campaign"]
-
-    money_cols = [
-        "total_budget_cents",
-        "spent_to_date_cents",
-        "remaining_budget_cents",
-        "expected_spend_to_date_cents",
-    ]
-
-    summed = (
-        df_leaf.groupby(group_cols, dropna=False)[money_cols]
-        .sum()
-        .reset_index()
-    )
-
-    # For day-based metrics, take min(start) and max(end) per campaign (safe default).
-    dates = (
-        df_leaf.groupby(group_cols, dropna=False)[["start_date", "end_date"]]
-        .agg({"start_date": "min", "end_date": "max"})
-        .reset_index()
-    )
-
-    paused = (
-        df_leaf.groupby(group_cols, dropna=False)[["paused_days_total", "paused_days_to_date"]]
-        .max()
-        .reset_index()
-    )
-
-    # Keep CPM/CTR/CPL only if consistent; else show blank (we can refine later).
-    def _consistent_or_none(s: pd.Series):
-        vals = [v for v in s.tolist() if v is not None and not (isinstance(v, float) and pd.isna(v))]
-        vals = list(dict.fromkeys(vals))
-        return vals[0] if len(vals) == 1 else None
-
-    perf = (
-        df_leaf.groupby(group_cols, dropna=False)[["CPM", "CTR", "CPL"]]
-        .agg(_consistent_or_none)
-        .reset_index()
-    )
-
-    out = summed.merge(dates, on=group_cols, how="left").merge(paused, on=group_cols, how="left").merge(perf, on=group_cols, how="left")
-    return out
-
-
-def compute_campaign_metrics_from_cents(df_campaign: pd.DataFrame, today: pd.Timestamp) -> pd.DataFrame:
-    """
-    Compute derived metrics on already-aggregated campaign rows.
-    IMPORTANT: Inputs are already in integer cents to preserve exact totals.
-    """
-    out = df_campaign.copy()
-
-    # Ensure required columns exist / types
-    out["total_budget_cents"] = pd.to_numeric(out["total_budget_cents"], errors="coerce").fillna(0).astype("int64")
-    out["spent_to_date_cents"] = pd.to_numeric(out["spent_to_date_cents"], errors="coerce").fillna(0).astype("int64")
-    out["remaining_budget_cents"] = (out["total_budget_cents"] - out["spent_to_date_cents"]).clip(lower=0).astype("int64")
-
-    out["start_date"] = parse_date_col(out["start_date"])
-    out["end_date"] = parse_date_col(out["end_date"])
-
-    if "paused_days_total" not in out.columns:
-        out["paused_days_total"] = 0
-    if "paused_days_to_date" not in out.columns:
-        out["paused_days_to_date"] = 0
-    out["paused_days_total"] = safe_int(out["paused_days_total"]).clip(lower=0)
-    out["paused_days_to_date"] = safe_int(out["paused_days_to_date"]).clip(lower=0)
-
-    # Day math
-    start_dt = pd.to_datetime(out["start_date"], errors="coerce")
-    end_dt = pd.to_datetime(out["end_date"], errors="coerce")
-    total_days = (end_dt - start_dt).dt.days + 1
-    out["total_days"] = total_days.fillna(0).astype("int64").clip(lower=0)
-    out["active_days_total"] = (out["total_days"] - out["paused_days_total"]).clip(lower=0)
-
-    today_date = pd.to_datetime(today).normalize()
-    effective_end = pd.to_datetime(out["end_date"], errors="coerce").fillna(today_date)
-    effective_start = pd.to_datetime(out["start_date"], errors="coerce").fillna(today_date)
-    capped_today = pd.Series([today_date] * len(out), index=out.index)
-    elapsed_end = pd.concat([capped_today, effective_end], axis=1).min(axis=1)
-    elapsed_days = (elapsed_end - effective_start).dt.days + 1
-    out["elapsed_days"] = elapsed_days.fillna(0).astype("int64").clip(lower=0)
-    out["elapsed_active_days"] = (out["elapsed_days"] - out["paused_days_to_date"]).clip(lower=0)
-    out["remaining_active_days"] = (out["active_days_total"] - out["elapsed_active_days"]).clip(lower=0)
-
-    # expected_spend_to_date_cents (deterministic prorate)
-    def _expected_spend_to_date_cents(row) -> int:
-        ad = int(row["active_days_total"])
-        if ad <= 0:
-            return 0
-        elapsed = int(row["elapsed_active_days"])
-        total = int(row["total_budget_cents"])
-        val = (Decimal(total) * Decimal(elapsed) / Decimal(ad)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-        return int(val)
-
-    out["expected_spend_to_date_cents"] = out.apply(_expected_spend_to_date_cents, axis=1).astype("int64")
-
-    # required_daily (string)
-    def _required_daily_str(row) -> Optional[str]:
-        rad = int(row["remaining_active_days"])
-        if rad <= 0:
-            return None
-        cents = int(row["remaining_budget_cents"])
-        val = Decimal(cents) / Decimal(100) / Decimal(rad)
-        return f"{_round2(val):.2f}"
-
-    out["required_daily"] = out.apply(_required_daily_str, axis=1)
-
-    # Platform min daily constraint
-    def _min_daily(channel: str) -> Optional[Decimal]:
-        return MIN_DAILY_BY_CHANNEL.get(channel)
-
-    out["min_daily"] = out["Channel"].astype(str).apply(_min_daily).apply(lambda d: f"{d:.2f}" if d is not None else None)
-
-    def _min_daily_violation(row) -> bool:
-        md = _min_daily(str(row["Channel"]))
-        if md is None:
-            return False
-        if row["required_daily"] is None:
-            return False
-        try:
-            req = Decimal(str(row["required_daily"]))
-        except InvalidOperation:
-            return False
-        return req < md
-
-    out["min_daily_violation"] = out.apply(_min_daily_violation, axis=1)
-
-    # Forecast engine (optional inputs)
-    for col in ("CPM", "CTR", "CPL"):
-        if col not in out.columns:
-            out[col] = None
-    out["CPM_dec"] = out["CPM"].apply(_to_decimal)
-    out["CTR_dec"] = out["CTR"].apply(_to_decimal)
-    out["CPL_dec"] = out["CPL"].apply(_to_decimal)
-    out["projected_spend_dec"] = out["total_budget_cents"].apply(lambda c: Decimal(int(c)) / Decimal(100))
-
-    def _forecast_leads(row) -> Optional[str]:
-        cpl = row["CPL_dec"]
-        if cpl is None or cpl <= 0:
-            return None
-        leads = row["projected_spend_dec"] / cpl
-        return f"{_round2(leads):.2f}"
-
-    out["forecast_leads"] = out.apply(_forecast_leads, axis=1)
-
-    def _forecast_impressions(row) -> Optional[str]:
-        cpm = row["CPM_dec"]
-        if cpm is None or cpm <= 0:
-            return None
-        imps = (row["projected_spend_dec"] / cpm) * Decimal(1000)
-        return f"{_round2(imps):.2f}"
-
-    def _forecast_clicks(row) -> Optional[str]:
-        ctr = row["CTR_dec"]
-        imps_str = _forecast_impressions(row)
-        if ctr is None or imps_str is None:
-            return None
-        try:
-            imps = Decimal(imps_str)
-        except InvalidOperation:
-            return None
-        clicks = imps * ctr
-        return f"{_round2(clicks):.2f}"
-
-    out["forecast_impressions"] = out.apply(_forecast_impressions, axis=1)
-    out["forecast_clicks"] = out.apply(_forecast_clicks, axis=1)
-
-    # pacing_ratio
-    def _pacing_ratio(row) -> Optional[str]:
-        expected = int(row["expected_spend_to_date_cents"])
-        actual = int(row["spent_to_date_cents"])
-        if expected <= 0:
-            return None
-        ratio = Decimal(actual) / Decimal(expected)
-        return f"{_round2(ratio):.2f}"
-
-    out["pacing_ratio"] = out.apply(_pacing_ratio, axis=1)
-
-    return out
-
-
-# ============================================================
-# UI
-# ============================================================
-def _is_totalish(s: object) -> bool:
-    if s is None:
-        return False
-    t = str(s).strip().lower()
-    return t.startswith("total") or t in {"tot", "sum", "grand_total"}
-
-
-def infer_group_path_column(df_norm: pd.DataFrame) -> Optional[str]:
-    candidates = [
-        "group",
-        "campaign_group_name",
-        "campaign_group",
-        "campaign_group_budget",
-        "campaign_group_name_",
-    ]
-    return first_existing_col(df_norm, candidates)
-
-
-def infer_campaign_name_column(df_norm: pd.DataFrame) -> Optional[str]:
-    candidates = ["campaign", "campaign_name"]
-    return first_existing_col(df_norm, candidates)
-
-
-def infer_budget_column(df_norm: pd.DataFrame) -> Optional[str]:
-    # preference order: lifetime/total first, then current/new allocations
-    candidates = [
-        "lifetime_budget",
-        "current_budget_total",
-        "current_total",
-        "total_budget",
-        "planned_spend",
-        "budget",
-        "current_budget",
-        "new_budget",
-        "new_total",
-        "new_budget_allocation_campaign_level",
-        "current_budget_allocation_campaign_level",
-    ]
-    return first_existing_col(df_norm, candidates)
-
-
-def infer_spend_column(df_norm: pd.DataFrame) -> Optional[str]:
-    candidates = [
-        "spent_to_date",
-        "spent",
-        "total_spent",
-        "amount_spent",
-        "cost",
-        "current_budget_utilisation",
-        "current_spend",
-    ]
-    return first_existing_col(df_norm, candidates)
-
-
-def infer_status_column(df_norm: pd.DataFrame) -> Optional[str]:
-    return first_existing_col(df_norm, ["status", "current_status", "off_on"])
-
-
-def split_group_path(group_path: pd.Series) -> pd.DataFrame:
-    """
-    Extract Program / Industry / Channel from a "Group" path.
-    Handles delimiters like:
-    - "BV / Nordcloud / AWS / Traffic"
-    - "BV I DECERNO I Awareness I 2025"
-    - "AO | General Funnel | Awareness"
-    """
+def drop_duplicate_header_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    cols = list(df.columns)
+    cols_l = [str(c).strip().lower() for c in cols]
+
+    def is_header_row(row: pd.Series) -> bool:
+        matches = 0
+        for c, cl in zip(cols, cols_l):
+            vs = str(row.get(c, "")).strip().lower()
+            if cl and vs == cl:
+                matches += 1
+        return matches >= max(2, int(len(cols) * 0.5))
+
+    return df.loc[~df.apply(is_header_row, axis=1)].reset_index(drop=True)
+
+
+def split_hierarchy_from_group(group_path: pd.Series) -> pd.DataFrame:
     s = group_path.astype(str).fillna("").replace("nan", "")
     segs = s.str.split(r"\s*/\s*|\s*\|\s*|\s+I\s+", expand=True)
-    # Ensure at least 3 cols exist
     for i in range(3):
         if segs.shape[1] <= i:
             segs[i] = ""
     return pd.DataFrame(
         {
-            "Program": segs.iloc[:, 0].fillna(""),
-            "Industry": segs.iloc[:, 1].fillna(""),
-            "Channel": segs.iloc[:, 2].fillna(""),
+            "customer": segs.iloc[:, 0].fillna(""),
+            "industry": segs.iloc[:, 1].fillna(""),
+            "program": segs.iloc[:, 2].fillna(""),
         }
     )
 
 
-def map_platform(channel: pd.Series) -> pd.Series:
-    c = channel.astype(str).str.lower()
-    platform = pd.Series(["Other"] * len(channel), index=channel.index, dtype="string")
-    platform[c.str.contains("linkedin", na=False)] = "LinkedIn"
-    platform[c.str.contains("google", na=False)] = "Google"
-    platform[c.str.contains("meta|facebook|instagram", na=False)] = "Meta"
+def infer_platform(text_series: pd.Series) -> pd.Series:
+    t = text_series.astype(str).str.lower().fillna("")
+    platform = pd.Series(["Other"] * len(t), index=t.index, dtype="string")
+    platform[t.str.contains("linkedin|convo|spotlight|si ads|thought leadership", na=False)] = "LinkedIn"
+    platform[t.str.contains("google|search|pmax|performance max|display|rda", na=False)] = "Google"
+    platform[t.str.contains("meta|facebook|instagram", na=False)] = "Meta"
     return platform
 
 
-def build_fact_table(raw_combined: pd.DataFrame) -> pd.DataFrame:
+def build_internal_table(raw: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a unified fact table for the UI from heterogeneous CSV schemas.
-    Uses a best-effort column inference and the "Group" path to extract hierarchy.
+    Output columns:
+      customer, channel, campaign, group,
+      start_date, end_date,
+      total_budget_cents, total_spent_cents,
+      status, source_file
     """
-    if raw_combined.empty:
+    if raw.empty:
         return pd.DataFrame()
 
-    df = raw_combined.copy()
-    # Normalize columns
+    df = raw.copy()
     df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
 
-    group_col = infer_group_path_column(df)
-    camp_col = infer_campaign_name_column(df)
-    bud_col = infer_budget_column(df)
-    sp_col = infer_spend_column(df)
-    st_col = infer_status_column(df)
-
-    # If no recognizable group column, we can't build hierarchy
-    if group_col is None:
-        return pd.DataFrame()
-
-    group_path = col_as_1d_series(df, group_col, default="").astype(str).fillna("")
-    hier = split_group_path(group_path)
-
-    campaign = col_as_1d_series(df, camp_col, default="").astype(str).fillna("")
-
-    # Date columns (flex mapping already present in START_DATE_ALIASES/END_DATE_ALIASES)
+    group_col = first_existing_col(df, GROUP_ALIASES)
+    camp_col = first_existing_col(df, CAMPAIGN_ALIASES)
+    budget_col = first_existing_col(df, BUDGET_ALIASES)
+    spent_col = first_existing_col(df, SPENT_ALIASES)
+    status_col = first_existing_col(df, STATUS_ALIASES)
     start_col = first_existing_col(df, START_DATE_ALIASES)
     end_col = first_existing_col(df, END_DATE_ALIASES)
-    start_date = col_as_1d_series(df, start_col, default=None)
-    end_date = col_as_1d_series(df, end_col, default=None)
 
-    budget_raw = col_as_1d_series(df, bud_col, default=None)
-    spend_raw = col_as_1d_series(df, sp_col, default=None)
-    status_raw = col_as_1d_series(df, st_col, default="")
+    group_path = col_as_1d(df, group_col, default="")
+    campaign = col_as_1d(df, camp_col, default="")
+    budget_raw = col_as_1d(df, budget_col, default=0)
+    spent_raw = col_as_1d(df, spent_col, default=0)
+    status_raw = col_as_1d(df, status_col, default="")
+    start_raw = col_as_1d(df, start_col, default=None)
+    end_raw = col_as_1d(df, end_col, default=None)
 
-    # Extra validation to guarantee 1D inputs for DataFrame constructor
-    start_date = ensure_1d(start_date, df.index, default=None)
-    end_date = ensure_1d(end_date, df.index, default=None)
-    budget_raw = ensure_1d(budget_raw, df.index, default=None)
-    spend_raw = ensure_1d(spend_raw, df.index, default=None)
-    status_raw = ensure_1d(status_raw, df.index, default="")
+    # Flatten + validate types
+    today_d = pd.Timestamp.today().date()
+    start_date = parse_date(start_raw).fillna(today_d)
+    end_date = parse_date(end_raw).fillna(today_d)
+
+    total_budget_cents = series_to_cents(budget_raw)
+    total_spent_cents = series_to_cents(spent_raw)
+
+    # Hierarchy: use Group to extract customer/channel-ish, then infer platform from combined text
+    hier = split_hierarchy_from_group(group_path)
+    combined_text = group_path.astype(str) + " " + campaign.astype(str)
+    channel = infer_platform(combined_text)
 
     out = pd.DataFrame(
         {
-            "Group": group_path,
-            "Program": hier["Program"],
-            "Industry": hier["Industry"],
-            "Channel": hier["Channel"],
-            "Platform": map_platform(hier["Channel"]),
-            "Campaign": campaign,
-            "Status": status_raw.astype(str).fillna(""),
+            "customer": hier["customer"].astype(str).fillna(""),
+            "industry": hier["industry"].astype(str).fillna(""),
+            "program": hier["program"].astype(str).fillna(""),
+            "channel": channel.astype(str).fillna("Other"),
+            "group": group_path.astype(str).fillna(""),
+            "campaign": campaign.astype(str).fillna(""),
+            "status": status_raw.astype(str).fillna(""),
             "start_date": start_date,
             "end_date": end_date,
-            "budget_raw": budget_raw,
-            "spend_raw": spend_raw,
-            "__source_file": df.get("__source_file", ""),
+            "total_budget_cents": total_budget_cents,
+            "total_spent_cents": total_spent_cents,
+            "source_file": col_as_1d(df, "__source_file", default="").astype(str),
         }
     )
 
-    # Remove obvious total rows
-    mask_total = out["Group"].apply(_is_totalish) | out["Campaign"].apply(_is_totalish)
+    # Drop obvious totals
+    def is_totalish(x: object) -> bool:
+        t = str(x).strip().lower()
+        return t.startswith("total") or t in {"tot", "sum", "grand_total"}
+
+    mask_total = out["group"].apply(is_totalish) | out["campaign"].apply(is_totalish)
     out = out.loc[~mask_total].copy()
 
-    # Parse money
-    out["budget_cents"] = series_to_cents(out["budget_raw"]).fillna(0).astype("int64")
-    out["spend_cents"] = series_to_cents(out["spend_raw"]).fillna(0).astype("int64")
+    # If campaign empty, use group as a fallback label
+    out.loc[out["campaign"].str.strip() == "", "campaign"] = out["group"]
 
-    # Dates default + type validation
-    today_d = pd.Timestamp.today().date()
-    out["start_date"] = parse_date_col(out["start_date"]).fillna(today_d)
-    out["end_date"] = parse_date_col(out["end_date"]).fillna(today_d)
-
-    # Aggregate to campaign grain for visuals
-    key_cols = ["Program", "Industry", "Channel", "Platform", "Group", "Campaign"]
-    agg = out.groupby(key_cols, dropna=False)[["budget_cents", "spend_cents"]].sum().reset_index()
-    agg["start_date"] = out.groupby(key_cols, dropna=False)["start_date"].min().reset_index(drop=True)
-    agg["end_date"] = out.groupby(key_cols, dropna=False)["end_date"].max().reset_index(drop=True)
-    return agg
+    return out
 
 
-def money_fmt_from_cents(cents: int) -> str:
+# ============================================================
+# SETTINGS / ALERTS (session_state)
+# ============================================================
+if "alert_enabled" not in st.session_state:
+    st.session_state.alert_enabled = True
+if "alert_threshold" not in st.session_state:
+    st.session_state.alert_threshold = 0.90
+if "show_debug" not in st.session_state:
+    st.session_state.show_debug = False
+
+
+def compute_utilization(df: pd.DataFrame) -> pd.Series:
+    budget = df["total_budget_cents"].astype("int64")
+    spent = df["total_spent_cents"].astype("int64")
+    util = pd.Series([0.0] * len(df), index=df.index, dtype="float64")
+    mask = budget > 0
+    util.loc[mask] = (spent.loc[mask] / budget.loc[mask]).astype("float64")
+    return util.clip(lower=0.0)
+
+
+def compute_forecast_cents(df: pd.DataFrame) -> pd.Series:
+    """
+    Forecasted Spend = spent_to_date + daily_burn * remaining_days
+    daily_burn = spent_to_date / elapsed_days (elapsed_days >= 1)
+    """
+    today = pd.Timestamp.today().date()
+    start = pd.to_datetime(df["start_date"], errors="coerce").dt.date.fillna(today)
+    end = pd.to_datetime(df["end_date"], errors="coerce").dt.date.fillna(today)
+
+    elapsed_end = pd.Series([min(today, e) for e in end], index=df.index)
+    elapsed_days = (pd.to_datetime(elapsed_end) - pd.to_datetime(start)).dt.days + 1
+    elapsed_days = elapsed_days.clip(lower=1)
+
+    remaining_days = (pd.to_datetime(end) - pd.to_datetime(elapsed_end)).dt.days
+    remaining_days = remaining_days.clip(lower=0)
+
+    spent = df["total_spent_cents"].astype("int64")
+    daily_burn = (spent / elapsed_days).astype("float64")
+    forecast = spent + (daily_burn * remaining_days).round().astype("int64")
+    return forecast.clip(lower=0)
+
+
+def alert_badge(status: str, utilization: float, forecast_overrun: bool) -> str:
+    if not st.session_state.alert_enabled:
+        return ""
+    red = utilization >= st.session_state.alert_threshold
+    unexpected_stop = str(status).strip().lower() in {"stopped", "unexpected stop"}  # placeholder mapping
+    if red or unexpected_stop:
+        return '<span class="bv-badge bv-badge-red">● Critical</span>'
+    if forecast_overrun:
+        return '<span class="bv-badge bv-badge-yellow">● Warning</span>'
+    return ""
+
+
+def money(cents: int) -> str:
     return f"{Decimal(int(cents)) / Decimal(100):,.2f}"
 
 
-def vega_donut(df: pd.DataFrame, label_col: str, value_col: str, title: str):
+# ============================================================
+# CHARTS (Vega-Lite)
+# ============================================================
+def vega_donut(values: list[dict], title: str, color_domain: Optional[list[str]] = None, color_range: Optional[list[str]] = None):
+    enc_color = {"field": "label", "type": "nominal", "legend": {"title": ""}}
+    if color_domain and color_range:
+        enc_color["scale"] = {"domain": color_domain, "range": color_range}
     spec = {
         "title": title,
-        "data": {"values": df[[label_col, value_col]].to_dict(orient="records")},
-        "mark": {"type": "arc", "innerRadius": 55},
+        "data": {"values": values},
+        "mark": {"type": "arc", "innerRadius": 62},
         "encoding": {
-            "theta": {"field": value_col, "type": "quantitative"},
-            "color": {"field": label_col, "type": "nominal", "legend": {"title": ""}},
-            "tooltip": [{"field": label_col}, {"field": value_col}],
+            "theta": {"field": "value", "type": "quantitative"},
+            "color": enc_color,
+            "tooltip": [{"field": "label"}, {"field": "value"}],
         },
         "view": {"stroke": None},
     }
     st.vega_lite_chart(spec, use_container_width=True)
 
 
-def vega_grouped_bar(df: pd.DataFrame, x: str, series: str, y: str, title: str):
+def vega_hbar(values: list[dict], title: str):
     spec = {
         "title": title,
-        "data": {"values": df[[x, series, y]].to_dict(orient="records")},
-        "mark": "bar",
+        "data": {"values": values},
+        "mark": {"type": "bar", "cornerRadiusEnd": 4},
         "encoding": {
-            "x": {"field": x, "type": "nominal", "sort": "-y", "axis": {"labelAngle": -20}},
-            "y": {"field": y, "type": "quantitative"},
-            "color": {"field": series, "type": "nominal", "legend": {"title": ""}},
-            "xOffset": {"field": series},
-            "tooltip": [{"field": x}, {"field": series}, {"field": y}],
+            "y": {"field": "label", "type": "nominal", "sort": "-x", "title": ""},
+            "x": {"field": "value", "type": "quantitative", "title": ""},
+            "color": {"field": "series", "type": "nominal", "legend": {"title": ""}},
+            "tooltip": [{"field": "label"}, {"field": "series"}, {"field": "value"}],
         },
+        "height": 360,
     }
     st.vega_lite_chart(spec, use_container_width=True)
 
 
-def vega_area(df: pd.DataFrame, x: str, y: str, title: str):
+def vega_area(values: list[dict], title: str):
     spec = {
         "title": title,
-        "data": {"values": df[[x, y]].to_dict(orient="records")},
-        "mark": {"type": "area", "line": True},
+        "data": {"values": values},
+        "mark": {"type": "area", "line": {"color": BV_RED}, "color": {"value": "rgba(226,35,26,0.20)"}},
         "encoding": {
-            "x": {"field": x, "type": "temporal"},
-            "y": {"field": y, "type": "quantitative"},
-            "tooltip": [{"field": x}, {"field": y}],
+            "x": {"field": "date", "type": "temporal", "title": ""},
+            "y": {"field": "value", "type": "quantitative", "title": ""},
+            "tooltip": [{"field": "date"}, {"field": "value"}],
         },
+        "height": 260,
     }
     st.vega_lite_chart(spec, use_container_width=True)
 
 
-def build_daily_spend_timeline(df_campaign: pd.DataFrame, days: int = 60) -> pd.DataFrame:
-    """
-    Best-effort daily spend series.
-    If no true daily spend exists, spread each campaign's spend evenly over elapsed days.
-    """
-    if df_campaign.empty:
-        return pd.DataFrame(columns=["date", "spend"])
-
-    today = pd.Timestamp.today().normalize()
-    start_bound = today - pd.Timedelta(days=days - 1)
-
-    # Compute per-campaign elapsed window
-    start = pd.to_datetime(df_campaign["start_date"], errors="coerce").fillna(today)
-    end = pd.to_datetime(df_campaign["end_date"], errors="coerce").fillna(today)
-    elapsed_end = pd.concat([end, pd.Series([today] * len(end), index=end.index)], axis=1).min(axis=1)
-    elapsed_start = pd.concat([start, pd.Series([start_bound] * len(start), index=start.index)], axis=1).max(axis=1)
-    elapsed_days = (elapsed_end - elapsed_start).dt.days + 1
-    elapsed_days = elapsed_days.clip(lower=1)
-
-    spend = df_campaign["spend_cents"].astype("int64")
-    per_day = (spend / elapsed_days).fillna(0)
-
-    # Expand into daily rows (small datasets expected)
-    rows: list[dict[str, object]] = []
-    for idx in df_campaign.index[:2000]:
-        s = elapsed_start.loc[idx]
-        e = elapsed_end.loc[idx]
-        if pd.isna(s) or pd.isna(e) or s > e:
-            continue
-        dr = pd.date_range(s, e, freq="D")
-        v = float(per_day.loc[idx]) / 100.0
-        for d in dr:
-            rows.append({"date": d.date().isoformat(), "spend": v})
-
-    if not rows:
-        return pd.DataFrame(columns=["date", "spend"])
-
-    out = pd.DataFrame(rows)
-    out = out.groupby("date", as_index=False)["spend"].sum()
-    return out
+# ============================================================
+# UI COMPONENTS
+# ============================================================
+def kpi_card(label: str, value: str, sub: str = ""):
+    st.markdown(
+        f"""
+<div class="bv-card">
+  <div class="bv-kpi-label">{label}</div>
+  <div class="bv-kpi-value">{value}</div>
+  <div class="bv-muted" style="margin-top:6px; font-size:13px;">{sub}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
 
-# -------------------------
-# Load local data once
-# -------------------------
-raw = load_local_budget_csvs()
+def progress_row(label: str, ratio: float, right: str, color: str = BV_RED):
+    pct = max(0.0, min(1.0, float(ratio)))
+    st.markdown(
+        f"""
+<div class="bv-card" style="padding: 12px 14px;">
+  <div style="display:flex; justify-content:space-between; align-items:center; gap:12px;">
+    <div style="font-weight:700;">{label}</div>
+    <div class="bv-muted" style="font-weight:700;">{right}</div>
+  </div>
+  <div class="bv-progress" style="margin-top:10px;">
+    <span style="width:{pct*100:.1f}%; background:{color};"></span>
+  </div>
+  <div class="bv-muted" style="margin-top:8px; font-size:12px;">{pct*100:.1f}% utilization</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+raw = load_all_csvs()
 if raw.empty:
-    st.error("No local CSV files found. Expected files like: `Copy of Budgets  - Sheet4.csv`")
+    st.error("No local CSV files found. Add files like `Copy of Budgets  - Sheet4.csv` to this folder.")
     st.stop()
 
-fact = build_fact_table(raw)
-if fact.empty:
-    st.error("Could not build a hierarchy fact table. Make sure your CSVs include a `Group` or `campaign group name` column.")
-    with st.expander("Raw combined CSV data preview"):
-        st.dataframe(raw.head(300), use_container_width=True)
+data = build_internal_table(raw)
+if data.empty:
+    st.error("Could not map your CSVs into the internal schema. Make sure at least one file has a Group/Campaign Group column.")
     st.stop()
 
 
-# -------------------------
-# Sidebar navigation
-# -------------------------
+# ============================================================
+# SIDEBAR (fixed-style nav + filters + sync)
+# ============================================================
+def set_page(p: str):
+    st.session_state.page = p
+
+
+if "page" not in st.session_state:
+    st.session_state.page = "Budget Overview"
+
 with st.sidebar:
-    st.header("Navigation")
-    page = st.radio("Menu", options=["Budget Overview", "Performance", "Simulation"], label_visibility="collapsed")
-    st.caption("Data source: local CSV files matching `Copy of Budgets*.csv`")
+    st.markdown(
+        f"""
+<div style="padding: 14px 8px 10px 8px;">
+  <div style="display:flex; align-items:center; gap:10px;">
+    <div style="width:36px; height:36px; border-radius:12px; background:rgba(226,35,26,0.12); border:1px solid rgba(226,35,26,0.22);"></div>
+    <div>
+      <div style="font-family:'Space Grotesk'; font-weight:800; font-size:16px; line-height:1;">Brightvision</div>
+      <div class="bv-muted" style="font-size:12px; margin-top:2px;">Ads Insights</div>
+    </div>
+  </div>
+  <div style="margin-top:10px;">
+    <span class="bv-pill">Internal Tool</span>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-
-if page == "Budget Overview":
-    st.subheader("Budget Overview")
-
-    total_budget_cents = int(fact["budget_cents"].sum())
-    total_spend_cents = int(fact["spend_cents"].sum())
-    active_customers = int(fact["Program"].replace("", pd.NA).dropna().nunique())
-    channels = int(fact["Platform"].replace("", pd.NA).dropna().nunique())
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Assigned Budget", money_fmt_from_cents(total_budget_cents))
-    c2.metric("Current Spend", money_fmt_from_cents(total_spend_cents))
-    c3.metric("Active Customers", f"{active_customers}")
-    c4.metric("Channels", f"{channels}")
+    # Navigation
+    st.markdown('<div class="bv-nav" style="padding: 0 8px;">', unsafe_allow_html=True)
+    pages = ["Budget Overview", "Spend Tracking", "Simulation", "Settings"]
+    for p in pages:
+        active = "active" if st.session_state.page == p else ""
+        if st.button(p, use_container_width=True, key=f"nav-{p}"):
+            set_page(p)
+        # Style buttons via CSS is limited; we keep button but provide nearby hint:
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("---")
+
+    # Global filters for Budget Overview
+    customers = ["All"] + sorted([c for c in data["customer"].unique().tolist() if str(c).strip() != ""])
+    channels = ["All", "LinkedIn", "Google", "Meta", "Other"]
+    selected_customer = st.selectbox("Customer", options=customers, index=0)
+    selected_channel = st.selectbox("Channel", options=channels, index=0)
+
+    st.markdown("---")
+
+    with st.expander("Alerts & thresholds", expanded=False):
+        st.session_state.alert_enabled = st.toggle("Enable alerts", value=st.session_state.alert_enabled)
+        st.session_state.alert_threshold = st.slider("Critical utilization threshold", 0.50, 1.00, float(st.session_state.alert_threshold), 0.01)
+        st.session_state.show_debug = st.toggle("Show debug panels", value=st.session_state.show_debug)
+
+    st.markdown("---")
+    # "Sync" button
+    if st.button("Sync data", use_container_width=True):
+        load_all_csvs.clear()
+        st.session_state.last_sync = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.rerun()
+    last_sync = st.session_state.get("last_sync", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
+    st.caption(f"Last sync: {last_sync}")
+
+
+# Apply filters
+filtered = data.copy()
+if selected_customer != "All":
+    filtered = filtered.loc[filtered["customer"] == selected_customer].copy()
+if selected_channel != "All":
+    filtered = filtered.loc[filtered["channel"] == selected_channel].copy()
+
+
+# ============================================================
+# PAGE: BUDGET OVERVIEW
+# ============================================================
+def page_budget_overview(df: pd.DataFrame):
+    st.markdown("## Budget Overview")
+    st.markdown('<div class="bv-muted">Overview of budgets, spend and allocation across channels.</div>', unsafe_allow_html=True)
+
+    # KPIs
+    total_budget = int(df["total_budget_cents"].sum())
+    total_spent = int(df["total_spent_cents"].sum())
+    active_customers = int(df["customer"].replace("", pd.NA).dropna().nunique())
+    active_channels = int(df["channel"].replace("", pd.NA).dropna().nunique())
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        kpi_card("Total Assigned Budget", money(total_budget))
+    with c2:
+        kpi_card("Current Spend", money(total_spent))
+    with c3:
+        kpi_card("Active Customers", f"{active_customers}")
+    with c4:
+        kpi_card("Active Channels", f"{active_channels}")
+
+    st.markdown("###")
+
     left, right = st.columns([1, 1])
 
-    # Donut: allocation by platform (LinkedIn/Google/Meta/Other)
-    alloc = fact.groupby("Platform", dropna=False)["budget_cents"].sum().reset_index()
-    alloc = alloc[alloc["budget_cents"] > 0].sort_values("budget_cents", ascending=False)
-    alloc["budget"] = alloc["budget_cents"].apply(lambda c: float(Decimal(int(c)) / Decimal(100)))
-    if alloc.empty:
-        left.info("No budget values found for donut chart.")
-    else:
-        with left:
-            vega_donut(alloc.rename(columns={"Platform": "Channel", "budget": "Budget"}), "Channel", "Budget", "Budget Allocation by Channel")
+    # Donut: allocation by channel
+    alloc = df.groupby("channel", dropna=False)["total_budget_cents"].sum().reindex(["LinkedIn", "Google", "Meta", "Other"]).fillna(0).reset_index()
+    alloc["value"] = alloc["total_budget_cents"].apply(lambda c: float(Decimal(int(c)) / Decimal(100)))
+    donut_values = [{"label": r["channel"], "value": r["value"]} for _, r in alloc.iterrows() if r["value"] > 0]
 
-    # Bar: customer budget vs spend (by Program)
-    cust = fact.groupby("Program", dropna=False)[["budget_cents", "spend_cents"]].sum().reset_index()
-    cust = cust[cust["Program"].astype(str).str.strip() != ""]
-    cust = cust.sort_values("budget_cents", ascending=False).head(12)
-    if cust.empty:
-        right.info("No customer budget/spend data found.")
-    else:
-        plot_rows = []
-        for _, r in cust.iterrows():
-            plot_rows.append({"Customer": r["Program"], "Series": "Budget", "Value": float(Decimal(int(r["budget_cents"])) / Decimal(100))})
-            plot_rows.append({"Customer": r["Program"], "Series": "Spend", "Value": float(Decimal(int(r["spend_cents"])) / Decimal(100))})
-        with right:
-            vega_grouped_bar(pd.DataFrame(plot_rows), x="Customer", series="Series", y="Value", title="Customer Budget vs Spend")
+    with left:
+        st.markdown('<div class="bv-card">', unsafe_allow_html=True)
+        if donut_values:
+            vega_donut(
+                donut_values,
+                "Budget Allocation by Channel",
+                color_domain=["LinkedIn", "Google", "Meta", "Other"],
+                color_range=[BV_RED, "#2563EB", "#9333EA", "#94A3B8"],
+            )
+        else:
+            st.info("No budget values available for allocation chart.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # HBar: customer budget vs spend
+    cust = df.groupby("customer", dropna=False)[["total_budget_cents", "total_spent_cents"]].sum().reset_index()
+    cust = cust[cust["customer"].astype(str).str.strip() != ""].sort_values("total_budget_cents", ascending=False).head(12)
+    hbar_vals: list[dict] = []
+    for _, r in cust.iterrows():
+        hbar_vals.append({"label": r["customer"], "series": "Budget", "value": float(Decimal(int(r["total_budget_cents"])) / Decimal(100))})
+        hbar_vals.append({"label": r["customer"], "series": "Actual", "value": float(Decimal(int(r["total_spent_cents"])) / Decimal(100))})
+
+    with right:
+        st.markdown('<div class="bv-card">', unsafe_allow_html=True)
+        if hbar_vals:
+            vega_hbar(hbar_vals, "Customer Budget vs Spend")
+        else:
+            st.info("No customer rows found.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("###")
+    st.markdown("## Spend Tracker")
+
+    # Spend tracker per channel
+    ch = df.groupby("channel")[["total_budget_cents", "total_spent_cents"]].sum().reset_index()
+    ch["util"] = ch.apply(lambda r: float(r["total_spent_cents"] / r["total_budget_cents"]) if int(r["total_budget_cents"]) > 0 else 0.0, axis=1)
+    ch = ch.sort_values("total_spent_cents", ascending=False)
+    colors = {"LinkedIn": BV_RED, "Google": "#2563EB", "Meta": "#9333EA", "Other": "#94A3B8"}
+    for _, r in ch.iterrows():
+        util = float(r["util"])
+        label = str(r["channel"])
+        right = f"{money(int(r['total_spent_cents']))} / {money(int(r['total_budget_cents']))}"
+        progress_row(label, util, right, color=colors.get(label, BV_RED))
 
 
-elif page == "Performance":
-    st.subheader("Performance")
+# ============================================================
+# PAGE: SPEND TRACKING
+# ============================================================
+def page_spend_tracking(df: pd.DataFrame):
+    st.markdown("## Spend Tracking")
+    st.markdown('<div class="bv-muted">Campaign-level spend, forecast and utilization with alerts.</div>', unsafe_allow_html=True)
 
-    spend_cents = int(fact["spend_cents"].sum())
-    # Optional metrics: if present in any raw CSV we could map them later; for now show 0 if missing.
-    impressions = 0
-    clicks = 0
-    conversions = 0
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Spend", money_fmt_from_cents(spend_cents))
-    c2.metric("Impressions", f"{impressions:,}")
-    c3.metric("Clicks", f"{clicks:,}")
-    c4.metric("Conversions", f"{conversions:,}")
-
-    st.markdown("---")
-    timeline = build_daily_spend_timeline(fact, days=60)
-    if timeline.empty:
-        st.info("Not enough date/spend info to build a daily spend timeline.")
-    else:
-        vega_area(timeline, x="date", y="spend", title="Daily Spend Timeline (estimated)")
-
-    st.markdown("---")
-    st.subheader("Campaign Group Performance")
-
-    grp = fact.groupby("Group", dropna=False)[["budget_cents", "spend_cents"]].sum().reset_index()
-    grp = grp[grp["Group"].astype(str).str.strip() != ""]
-    grp["utilization"] = grp.apply(
-        lambda r: float(Decimal(int(r["spend_cents"])) / Decimal(int(r["budget_cents"]))) if int(r["budget_cents"]) > 0 else 0.0,
-        axis=1,
+    # Build campaign table
+    campaigns = (
+        df.groupby(["channel", "campaign", "group"], dropna=False)[["total_budget_cents", "total_spent_cents"]]
+        .sum()
+        .reset_index()
     )
-    grp["budget"] = grp["budget_cents"].apply(money_fmt_from_cents)
-    grp["spend"] = grp["spend_cents"].apply(money_fmt_from_cents)
-    grp = grp.sort_values("spend_cents", ascending=False).head(25)
-
-    table = grp[["Group", "budget", "spend", "utilization"]].rename(
-        columns={"budget": "Budget", "spend": "Spend", "utilization": "Utilization"}
+    # join dates/status (best-effort)
+    meta = (
+        df.groupby(["channel", "campaign", "group"], dropna=False)[["start_date", "end_date", "status"]]
+        .agg({"start_date": "min", "end_date": "max", "status": "last"})
+        .reset_index()
     )
+    campaigns = campaigns.merge(meta, on=["channel", "campaign", "group"], how="left")
+    campaigns["utilization"] = compute_utilization(campaigns)
+    campaigns["forecast_cents"] = compute_forecast_cents(campaigns)
+    campaigns["forecast_overrun"] = campaigns["forecast_cents"] > campaigns["total_budget_cents"]
+
+    # Alert badges
+    badges = []
+    for _, r in campaigns.iterrows():
+        badges.append(alert_badge(r.get("status", ""), float(r["utilization"]), bool(r["forecast_overrun"])))
+    campaigns["alert"] = badges
+
+    # Status icon
+    def status_icon(s: object) -> str:
+        t = str(s).strip().lower()
+        if "active" in t or t in {"on"}:
+            return "🟢"
+        if "paused" in t or t in {"off"}:
+            return "🟡"
+        if "stopped" in t:
+            return "🔴"
+        return "⚪"
+
+    campaigns["status_icon"] = campaigns["status"].apply(status_icon)
+
+    # Pretty columns
+    table = pd.DataFrame(
+        {
+            "Status": campaigns["status_icon"],
+            "Platform": campaigns["channel"],
+            "Campaign Name": campaigns["campaign"],
+            "Assigned Budget": campaigns["total_budget_cents"].apply(money),
+            "Current Spend": campaigns["total_spent_cents"].apply(money),
+            "Forecasted Spend": campaigns["forecast_cents"].apply(money),
+            "Utilization": campaigns["utilization"].astype("float64"),
+            "Alerts": campaigns["alert"],
+        }
+    ).sort_values("Current Spend", ascending=False)
+
     st.data_editor(
         table,
         use_container_width=True,
@@ -1272,69 +748,183 @@ elif page == "Performance":
                 help="Spend / Budget",
                 format="%.0f%%",
                 min_value=0.0,
-                max_value=1.0,
-            )
+                max_value=1.2,
+            ),
+            "Alerts": st.column_config.TextColumn("Alerts"),
         },
     )
 
+    st.markdown("###")
+    st.markdown("## Cumulative Spend vs Budget")
 
-elif page == "Simulation":
-    st.subheader("Simulation")
+    # Area chart: approximate cumulative series using budget/spend spread over time
+    today = pd.Timestamp.today().normalize()
+    # Use the largest active window from data as chart horizon
+    min_start = pd.to_datetime(df["start_date"], errors="coerce").min()
+    max_end = pd.to_datetime(df["end_date"], errors="coerce").max()
+    if pd.isna(min_start) or pd.isna(max_end):
+        st.info("Not enough date coverage to build cumulative chart.")
+        return
+    horizon_start = max(min_start.normalize(), today - pd.Timedelta(days=90))
+    horizon_end = min(max_end.normalize(), today)
 
-    base = fact.groupby("Platform", dropna=False)["budget_cents"].sum().reset_index()
-    base = base.set_index("Platform")["budget_cents"].to_dict()
+    dates = pd.date_range(horizon_start, horizon_end, freq="D")
+    if len(dates) <= 1:
+        st.info("Not enough date coverage to build cumulative chart.")
+        return
 
-    def base_money(platform: str) -> Decimal:
-        return _round2(Decimal(int(base.get(platform, 0))) / Decimal(100))
+    total_budget = Decimal(int(df["total_budget_cents"].sum())) / Decimal(100)
+    total_spent = Decimal(int(df["total_spent_cents"].sum())) / Decimal(100)
+    # linear cum estimates
+    budget_per_day = float(total_budget / Decimal(max(1, len(dates))))
+    spend_per_day = float(total_spent / Decimal(max(1, len(dates))))
+    values = []
+    cum_budget = 0.0
+    cum_spend = 0.0
+    for d in dates:
+        cum_budget += budget_per_day
+        cum_spend += spend_per_day
+        values.append({"date": d.date().isoformat(), "value": cum_spend, "series": "Spend"})
+        values.append({"date": d.date().isoformat(), "value": cum_budget, "series": "Budget"})
 
-    st.markdown("Adjust platform budgets (best-effort; allocation logic can be added later).")
+    # Layered area via vega-lite
+    spec = {
+        "title": "Cumulative Spend vs Budget (estimated)",
+        "data": {"values": values},
+        "layer": [
+            {
+                "mark": {"type": "area", "opacity": 0.25},
+                "encoding": {
+                    "x": {"field": "date", "type": "temporal"},
+                    "y": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "series", "type": "nominal", "scale": {"domain": ["Spend", "Budget"], "range": [BV_RED, "#94A3B8"]}},
+                },
+            },
+            {
+                "mark": {"type": "line", "strokeWidth": 2},
+                "encoding": {
+                    "x": {"field": "date", "type": "temporal"},
+                    "y": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "series", "type": "nominal", "scale": {"domain": ["Spend", "Budget"], "range": [BV_RED, "#94A3B8"]}},
+                },
+            },
+        ],
+        "height": 280,
+    }
+    st.vega_lite_chart(spec, use_container_width=True)
 
-    colL, colG, colM = st.columns(3)
-    with colL:
-        li_val = st.slider(
-            "LinkedIn",
-            min_value=0.0,
-            max_value=float(base_money("LinkedIn") * Decimal(2) + Decimal("1000")),
-            value=float(base_money("LinkedIn")),
-            step=10.0,
-        )
-    with colG:
-        g_val = st.slider(
-            "Google",
-            min_value=0.0,
-            max_value=float(base_money("Google") * Decimal(2) + Decimal("1000")),
-            value=float(base_money("Google")),
-            step=10.0,
-        )
-    with colM:
-        m_val = st.slider(
-            "Meta",
-            min_value=0.0,
-            max_value=float(base_money("Meta") * Decimal(2) + Decimal("1000")),
-            value=float(base_money("Meta")),
-            step=10.0,
-        )
 
-    original_total = base_money("LinkedIn") + base_money("Google") + base_money("Meta")
-    simulated_total = _round2(Decimal(str(li_val)) + Decimal(str(g_val)) + Decimal(str(m_val)))
-    delta = _round2(simulated_total - original_total)
+# ============================================================
+# PAGE: SIMULATION
+# ============================================================
+@dataclass(frozen=True)
+class SimRow:
+    channel: str
+    original_cents: int
+    simulated_cents: int
 
+
+def page_simulation(df: pd.DataFrame):
+    st.markdown("## Simulation")
+    st.markdown('<div class="bv-muted">Adjust budgets by platform and compare allocation.</div>', unsafe_allow_html=True)
+
+    base = df.groupby("channel")["total_budget_cents"].sum().reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
+
+    def base_money(ch: str) -> Decimal:
+        return round2(Decimal(int(base.get(ch, 0))) / Decimal(100))
+
+    st.markdown("###")
+    cols = st.columns(3)
+    channels = ["LinkedIn", "Google", "Meta"]
+    sim: dict[str, int] = {}
+    for i, ch in enumerate(channels):
+        with cols[i]:
+            st.markdown(f'<div class="bv-card"><div class="bv-kpi-label">{ch}</div>', unsafe_allow_html=True)
+            orig = base_money(ch)
+            amt = st.number_input(f"{ch} amount", min_value=0.0, value=float(orig), step=50.0, key=f"sim-amt-{ch}")
+            pct = st.slider(f"{ch} change", min_value=-50, max_value=100, value=0, step=1, key=f"sim-pct-{ch}")
+            # numeric is the base; slider applies on top (so user can do both)
+            simulated = Decimal(str(amt)) * (Decimal(100 + int(pct)) / Decimal(100))
+            sim[ch] = int(round2(simulated) * 100)
+            st.markdown(
+                f'<div class="bv-muted" style="margin-top:8px;">Original → Simulated</div>'
+                f'<div style="font-family:Space Grotesk; font-weight:800; font-size:20px;">{orig:,.2f} → {round2(simulated):,.2f}</div>'
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    original_total = sum(int(base.get(ch, 0)) for ch in channels)
+    simulated_total = sum(sim.values())
+    delta = simulated_total - original_total
+    sign = "+" if delta >= 0 else "−"
+
+    st.markdown("###")
     k1, k2, k3 = st.columns(3)
-    k1.metric("Original Total", f"{original_total:,.2f}")
-    k2.metric("Simulated Total", f"{simulated_total:,.2f}")
-    k3.metric("Difference", f"{delta:,.2f}")
+    with k1:
+        kpi_card("Original Total", money(original_total))
+    with k2:
+        kpi_card("Simulated Total", money(simulated_total))
+    with k3:
+        kpi_card("Delta", f"{sign}{money(abs(delta))}", sub="Simulated − Original")
 
-    st.markdown("---")
-    sim_table = pd.DataFrame(
-        [
-            {"Platform": "LinkedIn", "Original": float(base_money("LinkedIn")), "Simulated": float(li_val)},
-            {"Platform": "Google", "Original": float(base_money("Google")), "Simulated": float(g_val)},
-            {"Platform": "Meta", "Original": float(base_money("Meta")), "Simulated": float(m_val)},
-        ]
-    )
-    st.dataframe(sim_table, use_container_width=True, hide_index=True)
+    st.markdown("###")
+    left, right = st.columns([1, 1])
+
+    current_vals = [{"label": ch, "value": float(Decimal(int(base.get(ch, 0))) / Decimal(100))} for ch in channels]
+    sim_vals = [{"label": ch, "value": float(Decimal(int(sim.get(ch, 0))) / Decimal(100))} for ch in channels]
+    with left:
+        st.markdown('<div class="bv-card">', unsafe_allow_html=True)
+        vega_donut(current_vals, "Current Allocation", color_domain=channels, color_range=[BV_RED, "#2563EB", "#9333EA"])
+        st.markdown("</div>", unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="bv-card">', unsafe_allow_html=True)
+        vega_donut(sim_vals, "Simulated Allocation", color_domain=channels, color_range=[BV_RED, "#2563EB", "#9333EA"])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("###")
+    # Comparison bar
+    bar_vals = []
+    for ch in channels:
+        bar_vals.append({"label": ch, "series": "Current", "value": float(Decimal(int(base.get(ch, 0))) / Decimal(100))})
+        bar_vals.append({"label": ch, "series": "Simulated", "value": float(Decimal(int(sim.get(ch, 0))) / Decimal(100))})
+    st.markdown('<div class="bv-card">', unsafe_allow_html=True)
+    vega_hbar(bar_vals, "Current vs Simulated")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
-with st.expander("Raw combined CSV data preview"):
-    st.dataframe(raw.head(500), use_container_width=True)
+# ============================================================
+# PAGE: SETTINGS
+# ============================================================
+def page_settings():
+    st.markdown("## Settings")
+    st.markdown('<div class="bv-muted">Configure alerts and data diagnostics.</div>', unsafe_allow_html=True)
+    st.markdown("###")
+    st.session_state.alert_enabled = st.toggle("Enable alerts", value=st.session_state.alert_enabled)
+    st.session_state.alert_threshold = st.slider("Critical utilization threshold", 0.50, 1.00, float(st.session_state.alert_threshold), 0.01)
+    st.session_state.show_debug = st.toggle("Show debug panels", value=st.session_state.show_debug)
+    st.markdown("###")
+    st.markdown('<div class="bv-card"><div class="bv-kpi-label">Data Source</div><div style="font-weight:700; margin-top:6px;">Local CSV files: <code>Copy of Budgets*.csv</code></div></div>', unsafe_allow_html=True)
+
+
+# ============================================================
+# ROUTER
+# ============================================================
+page = st.session_state.page
+if page == "Budget Overview":
+    page_budget_overview(filtered)
+elif page == "Spend Tracking":
+    page_spend_tracking(filtered)
+elif page == "Simulation":
+    page_simulation(filtered)
+elif page == "Settings":
+    page_settings()
+else:
+    page_budget_overview(filtered)
+
+
+if st.session_state.show_debug:
+    with st.expander("Debug: mapped internal table", expanded=False):
+        st.dataframe(data.head(400), use_container_width=True)
+    with st.expander("Debug: raw combined CSV", expanded=False):
+        st.dataframe(raw.head(400), use_container_width=True)
 
