@@ -157,13 +157,10 @@ export function forecastTotalSpend(
   const elapsedActiveDays = calculateElapsedActiveDays(startDate, pauseWindows);
   const remainingActiveDays = calculateRemainingActiveDays(endDate, pauseWindows);
   
-  // Calculate average daily spend
-  const averageDailySpend = elapsedActiveDays > 0 
-    ? campaign.actual_spend / elapsedActiveDays 
-    : campaign.daily_budget;
-  
-  // Project total spend at campaign end
-  const projectedSpend = campaign.actual_spend + (averageDailySpend * remainingActiveDays);
+  // Source-of-truth forecast:
+  // Forecasted Spend = spentToDate + (dailyBudget * activeDaysRemaining)
+  const averageDailySpend = campaign.daily_budget;
+  const projectedSpend = campaign.actual_spend + (campaign.daily_budget * remainingActiveDays);
   
   // Calculate variance
   const budgetVariance = projectedSpend - campaign.total_budget;
@@ -179,8 +176,8 @@ export function forecastTotalSpend(
   let daysUntilDepletion: number | null = null;
   let projectedDepletionDate: Date | null = null;
   
-  if (averageDailySpend > 0 && remainingBudget > 0) {
-    daysUntilDepletion = Math.ceil(remainingBudget / averageDailySpend);
+  if (campaign.daily_budget > 0 && remainingBudget > 0) {
+    daysUntilDepletion = Math.ceil(remainingBudget / campaign.daily_budget);
     
     // Calculate actual depletion date accounting for pause windows
     let daysCount = 0;
@@ -378,7 +375,7 @@ export function runBudgetSimulation(input: SimulationInput): SimulationOutput {
 export interface AlertCheck {
   shouldTriggerUtilizationWarning: boolean;
   shouldTriggerUtilizationCritical: boolean;
-  shouldTriggerForecastOverrun: boolean;
+  shouldTriggerStatusAlert: boolean;
   utilizationPercent: number;
   forecastVariancePercent: number;
   messages: string[];
@@ -395,26 +392,31 @@ export function checkCampaignAlerts(
   const forecast = forecastTotalSpend(campaign, pauseWindows);
   const forecastVariancePercent = forecast.budgetVariancePercent;
   
-  const shouldTriggerUtilizationWarning = utilizationPercent >= 90 && utilizationPercent < 95;
-  const shouldTriggerUtilizationCritical = utilizationPercent >= 95;
-  const shouldTriggerForecastOverrun = forecast.isOverrun && forecastVariancePercent > 5;
+  const shouldTriggerUtilizationWarning = utilizationPercent >= 90 && utilizationPercent < 100;
+  const shouldTriggerUtilizationCritical = utilizationPercent >= 100;
+  const shouldTriggerStatusAlert =
+    campaign.status === 'paused' &&
+    isWithinInterval(startOfDay(new Date()), {
+      start: startOfDay(new Date(campaign.start_date)),
+      end: startOfDay(new Date(campaign.end_date)),
+    });
   
   const messages: string[] = [];
   
   if (shouldTriggerUtilizationCritical) {
-    messages.push(`Kritisk: Budget-utnyttjande har nått ${utilizationPercent.toFixed(1)}%`);
+    messages.push(`Kritisk: Budget-utnyttjande har nått ${utilizationPercent.toFixed(2)}%`);
   } else if (shouldTriggerUtilizationWarning) {
-    messages.push(`Varning: Budget-utnyttjande har nått ${utilizationPercent.toFixed(1)}%`);
+    messages.push(`Varning: Budget-utnyttjande har nått ${utilizationPercent.toFixed(2)}%`);
   }
   
-  if (shouldTriggerForecastOverrun) {
-    messages.push(`Prognos-varning: Förväntad överskridning med ${forecastVariancePercent.toFixed(1)}%`);
+  if (shouldTriggerStatusAlert) {
+    messages.push('Status-varning: Kampanjen är PAUSED under pågående flight-datum.');
   }
   
   return {
     shouldTriggerUtilizationWarning,
     shouldTriggerUtilizationCritical,
-    shouldTriggerForecastOverrun,
+    shouldTriggerStatusAlert,
     utilizationPercent,
     forecastVariancePercent,
     messages,

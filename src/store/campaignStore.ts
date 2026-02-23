@@ -1,14 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Campaign, PauseWindow, Alert } from '../types';
-import { 
-  mockCampaigns, 
-  mockPauseWindows, 
-  mockAlerts,
-  mockCampaignGroups,
-  mockChannels,
-  mockCustomers 
-} from '../data/mockData';
+import { dataset } from '../data/dataset';
 import { 
   calculateDailyBudget, 
   forecastTotalSpend, 
@@ -16,6 +9,7 @@ import {
 } from '../utils/budgetCalculations';
 import type { ForecastResult, AlertCheck } from '../utils/budgetCalculations';
 import { v4 as uuidv4 } from 'uuid';
+import type { SimulationBaseline } from '../data/buildDatasetFromCsv';
 
 
 interface CampaignStore {
@@ -23,6 +17,9 @@ interface CampaignStore {
   campaigns: Campaign[];
   pauseWindows: PauseWindow[];
   alerts: Alert[];
+
+  // Simulation (per-campaign)
+  simulationByCampaignId: Record<string, SimulationBaseline>;
   
   // Campaign CRUD
   getCampaign: (campaignId: string) => Campaign | undefined;
@@ -41,13 +38,18 @@ interface CampaignStore {
   
   // Alert management
   generateAlertsForCampaign: (campaignId: string) => void;
+
+  // Simulation actions
+  setSimulation: (campaignId: string, updates: Partial<SimulationBaseline>) => void;
+  resetSimulation: (campaignId: string) => void;
+  resetAllSimulations: () => void;
   
   // Helpers
   getCampaignDetails: (campaignId: string) => {
     campaign: Campaign | undefined;
-    group: typeof mockCampaignGroups[0] | undefined;
-    channel: typeof mockChannels[0] | undefined;
-    customer: typeof mockCustomers[0] | undefined;
+    groupName: string | undefined;
+    channelName: string | undefined;
+    customerName: string | undefined;
     pauseWindows: PauseWindow[];
   };
 }
@@ -55,10 +57,50 @@ interface CampaignStore {
 export const useCampaignStore = create<CampaignStore>()(
   persist(
     (set, get) => ({
-      // Initialize with mock data
-      campaigns: mockCampaigns.map(c => ({ ...c })),
-      pauseWindows: mockPauseWindows.map(pw => ({ ...pw })),
-      alerts: mockAlerts.map(a => ({ ...a })),
+      // Initialize with CSV-built data
+      campaigns: dataset.campaigns.map(c => ({ ...c })),
+      pauseWindows: [],
+      alerts: dataset.campaigns.flatMap((c) => {
+        const check = checkCampaignAlerts(c, []);
+        const out: Alert[] = [];
+        if (check.shouldTriggerUtilizationCritical) {
+          out.push({
+            alert_id: uuidv4(),
+            campaign_id: c.campaign_id,
+            type: 'critical',
+            message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Immediate action required.`,
+            threshold: 100,
+            current_value: check.utilizationPercent,
+            is_read: false,
+            created_at: new Date(),
+          });
+        } else if (check.shouldTriggerUtilizationWarning) {
+          out.push({
+            alert_id: uuidv4(),
+            campaign_id: c.campaign_id,
+            type: 'warning',
+            message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Consider reviewing budget allocation.`,
+            threshold: 90,
+            current_value: check.utilizationPercent,
+            is_read: false,
+            created_at: new Date(),
+          });
+        }
+        if (check.shouldTriggerStatusAlert) {
+          out.push({
+            alert_id: uuidv4(),
+            campaign_id: c.campaign_id,
+            type: 'info',
+            message: `Status alert: campaign is PAUSED while within active flight dates.`,
+            threshold: 0,
+            current_value: 0,
+            is_read: false,
+            created_at: new Date(),
+          });
+        }
+        return out;
+      }),
+      simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
       
       getCampaign: (campaignId: string) => {
         return get().campaigns.find(c => c.campaign_id === campaignId);
@@ -205,8 +247,8 @@ export const useCampaignStore = create<CampaignStore>()(
             alert_id: uuidv4(),
             campaign_id: campaignId,
             type: 'critical',
-            message: `Budget utilization has reached ${alertCheck.utilizationPercent.toFixed(1)}%. Immediate action required.`,
-            threshold: 95,
+            message: `Budget utilization has reached ${alertCheck.utilizationPercent.toFixed(2)}%. Immediate action required.`,
+            threshold: 100,
             current_value: alertCheck.utilizationPercent,
             is_read: false,
             created_at: new Date(),
@@ -216,7 +258,7 @@ export const useCampaignStore = create<CampaignStore>()(
             alert_id: uuidv4(),
             campaign_id: campaignId,
             type: 'warning',
-            message: `Budget utilization has reached ${alertCheck.utilizationPercent.toFixed(1)}%. Consider reviewing budget allocation.`,
+            message: `Budget utilization has reached ${alertCheck.utilizationPercent.toFixed(2)}%. Consider reviewing budget allocation.`,
             threshold: 90,
             current_value: alertCheck.utilizationPercent,
             is_read: false,
@@ -224,14 +266,14 @@ export const useCampaignStore = create<CampaignStore>()(
           });
         }
         
-        if (alertCheck.shouldTriggerForecastOverrun) {
+        if (alertCheck.shouldTriggerStatusAlert) {
           newAlerts.push({
             alert_id: uuidv4(),
             campaign_id: campaignId,
-            type: 'warning',
-            message: `Forecast exceeds budget by ${alertCheck.forecastVariancePercent.toFixed(1)}%. Adjust daily budget to avoid overspending.`,
-            threshold: 100,
-            current_value: 100 + alertCheck.forecastVariancePercent,
+            type: 'info',
+            message: `Status alert: campaign is PAUSED while within active flight dates.`,
+            threshold: 0,
+            current_value: 0,
             is_read: false,
             created_at: new Date(),
           });
@@ -243,25 +285,52 @@ export const useCampaignStore = create<CampaignStore>()(
           }));
         }
       },
+
+      setSimulation: (campaignId, updates) => {
+        set((state) => ({
+          simulationByCampaignId: {
+            ...state.simulationByCampaignId,
+            [campaignId]: {
+              ...(state.simulationByCampaignId[campaignId] ?? dataset.simulationBaselinesByCampaignId[campaignId]),
+              ...updates,
+            },
+          },
+        }));
+      },
+
+      resetSimulation: (campaignId) => {
+        set((state) => ({
+          simulationByCampaignId: {
+            ...state.simulationByCampaignId,
+            [campaignId]: dataset.simulationBaselinesByCampaignId[campaignId] ?? { totalBudget: 0, dailyBudget: 0 },
+          },
+        }));
+      },
+
+      resetAllSimulations: () => {
+        set(() => ({
+          simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
+        }));
+      },
       
       getCampaignDetails: (campaignId: string) => {
         const campaign = get().getCampaign(campaignId);
-        const group = campaign 
-          ? mockCampaignGroups.find(g => g.group_id === campaign.group_id)
-          : undefined;
-        const channel = group 
-          ? mockChannels.find(ch => ch.channel_id === group.channel_id)
-          : undefined;
-        const customer = channel 
-          ? mockCustomers.find(c => c.customer_id === channel.customer_id)
-          : undefined;
+        const group = campaign ? dataset.campaignGroups.find(g => g.group_id === campaign.group_id) : undefined;
+        const channel = group ? dataset.channels.find(ch => ch.channel_id === group.channel_id) : undefined;
+        const customer = channel ? dataset.customers.find(c => c.customer_id === channel.customer_id) : undefined;
         const pauseWindows = get().getPauseWindows(campaignId);
         
-        return { campaign, group, channel, customer, pauseWindows };
+        return { 
+          campaign, 
+          groupName: group?.name, 
+          channelName: channel?.name, 
+          customerName: customer?.name, 
+          pauseWindows 
+        };
       },
     }),
     {
-      name: 'brightvision-campaigns',
+      name: 'brightvision-campaigns-csv-v1',
       storage: createJSONStorage(() => localStorage, {
         reviver: (_key, value) => {
           // Convert ISO date strings back to Date objects
@@ -275,6 +344,7 @@ export const useCampaignStore = create<CampaignStore>()(
         campaigns: state.campaigns,
         pauseWindows: state.pauseWindows,
         alerts: state.alerts,
+        simulationByCampaignId: state.simulationByCampaignId,
       }),
       onRehydrateStorage: () => (state) => {
         // Extra safety: ensure all dates are proper Date objects after rehydration

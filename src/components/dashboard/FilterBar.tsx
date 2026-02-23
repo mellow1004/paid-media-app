@@ -13,6 +13,10 @@ export function FilterBar() {
     setSelectedCampaignStatus 
   } = useDashboardStore();
 
+  const visibleChannels = selectedCustomerId
+    ? channels.filter(ch => ch.customer_id === selectedCustomerId)
+    : channels;
+
   return (
     <div className="flex flex-wrap items-center gap-4 p-4 bg-card rounded-lg border border-border/50 shadow-card">
       <div className="flex items-center gap-2 text-muted-foreground">
@@ -42,7 +46,7 @@ export function FilterBar() {
           className="h-9 px-3 rounded-lg border border-border bg-background text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
         >
           <option value="">All Channels</option>
-          {channels.map((channel) => (
+          {visibleChannels.map((channel) => (
             <option key={channel.channel_id} value={channel.channel_id}>
               {channel.name}
             </option>

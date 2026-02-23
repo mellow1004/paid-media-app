@@ -2,6 +2,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { useCampaignStore } from '../../store/campaignStore';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
+import { formatCurrency } from '../../utils/formatters';
 
 const CHANNEL_COLORS: Record<string, string> = {
   'LinkedIn': 'hsl(201 100% 35%)',
@@ -11,11 +12,14 @@ const CHANNEL_COLORS: Record<string, string> = {
 
 export function BudgetUtilizationChart() {
   const { campaigns } = useCampaignStore();
-  const { channels } = useDashboardStore();
+  const { channels, campaignGroups } = useDashboardStore();
 
   // Calculate budget per channel
-  const channelData = channels.map((channel, channelIndex) => {
-    const campaignsForChannel = campaigns.filter((_, idx) => idx % channels.length === channelIndex);
+  const channelData = channels.map((channel) => {
+    const groupIds = new Set(
+      campaignGroups.filter(g => g.channel_id === channel.channel_id).map(g => g.group_id)
+    );
+    const campaignsForChannel = campaigns.filter(c => groupIds.has(c.group_id));
     
     const totalBudget = campaignsForChannel.reduce((sum, c) => sum + c.total_budget, 0);
     const totalSpend = campaignsForChannel.reduce((sum, c) => sum + c.actual_spend, 0);
@@ -34,12 +38,12 @@ export function BudgetUtilizationChart() {
   const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: typeof channelData[0] }> }) => {
     if (active && payload && payload.length) {
       const data = payload[0].payload;
-      const percentage = totalBudget > 0 ? ((data.budget / totalBudget) * 100).toFixed(1) : 0;
+      const percentage = totalBudget > 0 ? ((data.budget / totalBudget) * 100).toFixed(2) : 0;
       return (
         <div className="bg-card border border-border rounded-lg shadow-soft p-3">
           <p className="font-medium text-foreground">{data.name}</p>
           <p className="text-sm text-muted-foreground">
-            Budget: <span className="font-medium text-foreground">{data.budget.toLocaleString('sv-SE')} kr</span>
+            Budget: <span className="font-medium text-foreground">{formatCurrency(data.budget, 'SEK')}</span>
           </p>
           <p className="text-sm text-muted-foreground">
             Andel: <span className="font-medium text-foreground">{percentage}%</span>
@@ -54,7 +58,7 @@ export function BudgetUtilizationChart() {
     return (
       <div className="flex flex-col gap-3 mt-4">
         {channelData.map((entry) => {
-          const percentage = totalBudget > 0 ? ((entry.budget / totalBudget) * 100).toFixed(0) : 0;
+          const percentage = totalBudget > 0 ? ((entry.budget / totalBudget) * 100).toFixed(2) : 0;
           return (
             <div key={entry.name} className="flex items-center justify-between">
               <div className="flex items-center gap-2">

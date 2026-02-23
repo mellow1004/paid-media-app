@@ -188,7 +188,7 @@ export function CampaignsPage() {
                           <div className="w-16 h-2 overflow-hidden rounded-full bg-muted">
                             <div 
                               className={`h-full transition-all duration-300 rounded-full ${
-                                utilization >= 95 ? 'bg-destructive' :
+                                utilization >= 100 ? 'bg-destructive' :
                                 utilization >= 90 ? 'bg-warning' :
                                 'bg-success'
                               }`}
@@ -196,11 +196,11 @@ export function CampaignsPage() {
                             />
                           </div>
                           <span className={`text-sm font-medium ${
-                            utilization >= 95 ? 'text-destructive' :
+                            utilization >= 100 ? 'text-destructive' :
                             utilization >= 90 ? 'text-warning-600' :
                             'text-success'
                           }`}>
-                            {utilization.toFixed(0)}%
+                            {utilization.toFixed(2)}%
                           </span>
                         </div>
                       </td>

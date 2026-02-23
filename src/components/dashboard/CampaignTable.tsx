@@ -24,15 +24,33 @@ interface CampaignWithHealth {
 
 export function CampaignTable() {
   const { campaigns, pauseWindows } = useCampaignStore();
-  const { customers } = useDashboardStore();
+  const { 
+    customers,
+    channels,
+    campaignGroups,
+    selectedCustomerId,
+    selectedChannelId,
+    selectedCampaignStatus,
+  } = useDashboardStore();
 
-  // Get currency from first customer or default to SEK
   const currency = customers[0]?.currency || 'SEK';
+
+  const groupById = new Map(campaignGroups.map(g => [g.group_id, g]));
+  const channelById = new Map(channels.map(ch => [ch.channel_id, ch]));
 
   // Calculate health status for each campaign
   const campaignsWithHealth: CampaignWithHealth[] = campaigns
     .filter(() => {
-      // In a real app, we'd filter by selectedCustomerId and selectedChannelId
+      return true;
+    })
+    .filter((campaign) => {
+      if (selectedCampaignStatus && campaign.status !== selectedCampaignStatus) return false;
+
+      const group = groupById.get(campaign.group_id);
+      const channel = group ? channelById.get(group.channel_id) : undefined;
+
+      if (selectedChannelId && channel?.channel_id !== selectedChannelId) return false;
+      if (selectedCustomerId && channel?.customer_id !== selectedCustomerId) return false;
       return true;
     })
     .map(campaign => {
@@ -46,19 +64,24 @@ export function CampaignTable() {
       
       const forecast = forecastTotalSpend(campaign, campaignPauseWindows);
       const forecastedSpend = forecast.projectedSpend;
-      const forecastOverrun = forecastedSpend > campaign.total_budget * 1.05;
+      const today = new Date();
+      const isStatusAlert =
+        campaign.status === 'paused' &&
+        today >= new Date(campaign.start_date) &&
+        today <= new Date(campaign.end_date);
       
       let health: HealthStatus = 'good';
       let healthReason = 'On track';
       
-      if (utilization >= 95 || forecastOverrun) {
+      if (utilization >= 100) {
         health = 'critical';
-        healthReason = forecastOverrun 
-          ? `Forecast exceeds budget by ${((forecastedSpend / campaign.total_budget - 1) * 100).toFixed(0)}%`
-          : 'Budget nearly exhausted';
+        healthReason = 'Budget exhausted';
       } else if (utilization >= 90) {
         health = 'warning';
         healthReason = 'Approaching budget limit';
+      } else if (isStatusAlert) {
+        health = 'warning';
+        healthReason = 'Paused during active flight';
       }
       
       return {
@@ -132,19 +155,19 @@ export function CampaignTable() {
 
   const getForecastTrend = (campaign: CampaignWithHealth) => {
     const ratio = campaign.forecastedSpend / campaign.total_budget;
-    if (ratio > 1.05) {
+    if (ratio > 1.0) {
       return (
         <span className="inline-flex items-center gap-1 text-destructive text-xs">
           <TrendingUp className="w-3.5 h-3.5" />
-          +{((ratio - 1) * 100).toFixed(0)}%
+          +{((ratio - 1) * 100).toFixed(2)}%
         </span>
       );
     }
-    if (ratio < 0.95) {
+    if (ratio < 1.0) {
       return (
         <span className="inline-flex items-center gap-1 text-warning-600 text-xs">
           <TrendingDown className="w-3.5 h-3.5" />
-          {((ratio - 1) * 100).toFixed(0)}%
+          {((ratio - 1) * 100).toFixed(2)}%
         </span>
       );
     }
@@ -222,7 +245,7 @@ export function CampaignTable() {
                     <div className="w-32">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-medium text-foreground">
-                          {campaign.utilization.toFixed(0)}%
+                          {campaign.utilization.toFixed(2)}%
                         </span>
                       </div>
                       <div className="h-2 w-full overflow-hidden rounded-full bg-muted">

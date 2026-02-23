@@ -75,11 +75,11 @@ export function DashboardPage() {
         />
         <MetricCard
           title="Budget Utilization"
-          value={`${metrics.utilization.toFixed(1)}%`}
+          value={`${metrics.utilization.toFixed(2)}%`}
           change={metrics.utilization - 75}
           changeLabel="from target"
           trend={metrics.utilization > 90 ? 'up' : 'neutral'}
-          variant={metrics.utilization > 95 ? 'destructive' : metrics.utilization > 90 ? 'warning' : 'success'}
+          variant={metrics.utilization >= 100 ? 'destructive' : metrics.utilization >= 90 ? 'warning' : 'success'}
         />
         <MetricCard
           title="Active Campaigns"

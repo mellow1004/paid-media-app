@@ -2,16 +2,17 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { useCampaignStore } from '../../store/campaignStore';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { Card, CardHeader, CardTitle, CardContent } from '../ui/Card';
+import { formatCurrency } from '../../utils/formatters';
 
 export function CustomerBudgetChart() {
   const { campaigns } = useCampaignStore();
-  const { customers } = useDashboardStore();
+  const { customers, channels, campaignGroups } = useDashboardStore();
 
   // Calculate budget and spend per customer
   const customerData = customers.map(customer => {
-    // For demo, distribute campaigns across customers
-    const customerIndex = customers.findIndex(c => c.customer_id === customer.customer_id);
-    const campaignsForCustomer = campaigns.filter((_, idx) => idx % customers.length === customerIndex);
+    const channelIds = new Set(channels.filter(ch => ch.customer_id === customer.customer_id).map(ch => ch.channel_id));
+    const groupIds = new Set(campaignGroups.filter(g => channelIds.has(g.channel_id)).map(g => g.group_id));
+    const campaignsForCustomer = campaigns.filter(c => groupIds.has(c.group_id));
     
     const totalBudget = campaignsForCustomer.reduce((sum, c) => sum + c.total_budget, 0);
     const totalSpend = campaignsForCustomer.reduce((sum, c) => sum + c.actual_spend, 0);
@@ -34,7 +35,7 @@ export function CustomerBudgetChart() {
             <p key={index} className="text-sm text-muted-foreground">
               {entry.dataKey === 'budget' ? 'Budget' : 'Spend'}:{' '}
               <span className="font-medium" style={{ color: entry.color }}>
-                {entry.value.toLocaleString('sv-SE')} kr
+                {formatCurrency(entry.value, 'SEK')}
               </span>
             </p>
           ))}

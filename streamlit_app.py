@@ -188,7 +188,37 @@ def col_as_1d(df: pd.DataFrame, col: Optional[str], default: object = None) -> p
 
 
 def parse_date(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce").dt.date
+    # Primary format across provided CSVs is MM/DD/YYYY (e.g. 9/16/2025).
+    # We parse with an explicit format first to avoid pandas' "Could not infer format"
+    # warning, then fall back to a flexible parser for any remaining values.
+    s = series.astype(str).str.strip()
+    s = s.replace(
+        {
+            "": pd.NA,
+            "-": pd.NA,
+            "—": pd.NA,
+            "nan": pd.NA,
+            "NaN": pd.NA,
+            "None": pd.NA,
+        }
+    )
+
+    parsed = pd.to_datetime(s, format="%m/%d/%Y", errors="coerce")
+
+    # Fallback: parse remaining values using pandas' flexible "mixed" parser.
+    mask = parsed.isna() & s.notna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(s[mask], format="mixed", errors="coerce")
+
+    # Final fallback: try day-first for any leftovers (covers occasional DD/MM/YYYY).
+    mask2 = parsed.isna() & s.notna()
+    if mask2.any():
+        parsed.loc[mask2] = pd.to_datetime(s[mask2], format="mixed", dayfirst=True, errors="coerce")
+
+    out = parsed.dt.date
+    # Ensure missing values become None (not NaT) to keep downstream logic clean.
+    out = out.where(parsed.notna(), None)
+    return out
 
 
 def round2(x: Decimal) -> Decimal:
@@ -380,11 +410,20 @@ if "alert_enabled" not in st.session_state:
     st.session_state.alert_enabled = True
 if "alert_threshold" not in st.session_state:
     st.session_state.alert_threshold = 0.90
+if "forecast_threshold" not in st.session_state:
+    st.session_state.forecast_threshold = 1.05  # 5% overrun
 if "show_debug" not in st.session_state:
     st.session_state.show_debug = False
 
 
+# ============================================================
+# CORE BUSINESS LOGIC: METRIC CALCULATIONS
+# ============================================================
 def compute_utilization(df: pd.DataFrame) -> pd.Series:
+    """
+    Utilization % = (spentToDate / totalBudget) × 100
+    Returns as a ratio (0.0-1.0+)
+    """
     budget = df["total_budget_cents"].astype("int64")
     spent = df["total_spent_cents"].astype("int64")
     util = pd.Series([0.0] * len(df), index=df.index, dtype="float64")
@@ -393,38 +432,221 @@ def compute_utilization(df: pd.DataFrame) -> pd.Series:
     return util.clip(lower=0.0)
 
 
-def compute_forecast_cents(df: pd.DataFrame) -> pd.Series:
+def compute_active_days(df: pd.DataFrame) -> pd.Series:
     """
-    Forecasted Spend = spent_to_date + daily_burn * remaining_days
-    daily_burn = spent_to_date / elapsed_days (elapsed_days >= 1)
+    Active Days = totalDays - pausedDays
+    For now, pausedDays = 0 (no pause window data in CSVs)
     """
     today = pd.Timestamp.today().date()
-    start = pd.to_datetime(df["start_date"], errors="coerce").dt.date.fillna(today)
-    end = pd.to_datetime(df["end_date"], errors="coerce").dt.date.fillna(today)
+    start = parse_date(df["start_date"]).fillna(today)
+    end = parse_date(df["end_date"]).fillna(today)
+    
+    total_days = (pd.to_datetime(end) - pd.to_datetime(start)).dt.days + 1
+    total_days = total_days.clip(lower=1)
+    
+    # TODO: subtract pausedDays when pause window data is available
+    paused_days = 0
+    return (total_days - paused_days).clip(lower=0)
 
+
+def compute_elapsed_active_days(df: pd.DataFrame) -> pd.Series:
+    """
+    Days elapsed from start_date to min(today, end_date)
+    """
+    today = pd.Timestamp.today().date()
+    start = parse_date(df["start_date"]).fillna(today)
+    end = parse_date(df["end_date"]).fillna(today)
+    
     elapsed_end = pd.Series([min(today, e) for e in end], index=df.index)
-    elapsed_days = (pd.to_datetime(elapsed_end) - pd.to_datetime(start)).dt.days + 1
-    elapsed_days = elapsed_days.clip(lower=1)
+    elapsed = (pd.to_datetime(elapsed_end) - pd.to_datetime(start)).dt.days + 1
+    return elapsed.clip(lower=1)
 
-    remaining_days = (pd.to_datetime(end) - pd.to_datetime(elapsed_end)).dt.days
-    remaining_days = remaining_days.clip(lower=0)
 
+def compute_remaining_active_days(df: pd.DataFrame) -> pd.Series:
+    """
+    Days remaining from min(today, end_date) to end_date
+    """
+    today = pd.Timestamp.today().date()
+    end = parse_date(df["end_date"]).fillna(today)
+    
+    elapsed_end = pd.Series([min(today, e) for e in end], index=df.index)
+    remaining = (pd.to_datetime(end) - pd.to_datetime(elapsed_end)).dt.days
+    return remaining.clip(lower=0)
+
+
+def compute_avg_daily_spend_cents(df: pd.DataFrame) -> pd.Series:
+    """
+    avgDailySpend = spentToDate / elapsedActiveDays
+    """
+    elapsed = compute_elapsed_active_days(df)
     spent = df["total_spent_cents"].astype("int64")
-    daily_burn = (spent / elapsed_days).astype("float64")
-    forecast = spent + (daily_burn * remaining_days).round().astype("int64")
+    return (spent / elapsed).astype("float64")
+
+
+def compute_daily_budget_cents(df: pd.DataFrame) -> pd.Series:
+    """
+    dailyBudget = totalBudget / activeDays
+    """
+    active_days = compute_active_days(df)
+    budget = df["total_budget_cents"].astype("int64")
+    return (budget / active_days).astype("float64")
+
+
+def compute_forecast_cents(df: pd.DataFrame) -> pd.Series:
+    """
+    Forecasted Spend = spentToDate + (avgDailySpend × activeDaysRemaining)
+    """
+    spent = df["total_spent_cents"].astype("int64")
+    avg_daily = compute_avg_daily_spend_cents(df)
+    remaining = compute_remaining_active_days(df)
+    
+    forecast = spent + (avg_daily * remaining).round().astype("int64")
     return forecast.clip(lower=0)
 
 
-def alert_badge(status: str, utilization: float, forecast_overrun: bool) -> str:
+# ============================================================
+# ALERT LOGIC: THREE-TIER SYSTEM
+# ============================================================
+def compute_alert_level(row: pd.Series) -> str:
+    """
+    Returns: 'critical', 'warning', or ''
+    
+    Critical: Utilization ≥ threshold OR Unexpected Status
+    Warning: Forecast Overrun ≥ forecast_threshold
+    """
     if not st.session_state.alert_enabled:
         return ""
-    red = utilization >= st.session_state.alert_threshold
-    unexpected_stop = str(status).strip().lower() in {"stopped", "unexpected stop"}  # placeholder mapping
-    if red or unexpected_stop:
+    
+    utilization = float(row.get("utilization", 0.0))
+    forecast_cents = int(row.get("forecast_cents", 0))
+    budget_cents = int(row.get("total_budget_cents", 1))
+    status = str(row.get("status", "")).strip().lower()
+    
+    # Critical: Budget exceeded or unexpected stop
+    if utilization >= st.session_state.alert_threshold:
+        return "critical"
+    
+    unexpected_statuses = {"stopped", "ended", "paused", "off"}
+    today = pd.Timestamp.today().date()
+    end_date = row.get("end_date", today)
+    if isinstance(end_date, str):
+        end_date = parse_date(pd.Series([end_date])).iloc[0]
+    if end_date is None:
+        end_date = today
+    
+    # Unexpected stop: campaign is stopped but end_date is in future
+    if status in unexpected_statuses and end_date > today:
+        return "critical"
+    
+    # Warning: Forecast overrun
+    forecast_ratio = float(forecast_cents / budget_cents) if budget_cents > 0 else 0.0
+    if forecast_ratio >= st.session_state.forecast_threshold:
+        return "warning"
+    
+    return ""
+
+
+def alert_badge(alert_level: str) -> str:
+    """
+    Renders HTML badge for alert level
+    """
+    if alert_level == "critical":
         return '<span class="bv-badge bv-badge-red">● Critical</span>'
-    if forecast_overrun:
+    elif alert_level == "warning":
         return '<span class="bv-badge bv-badge-yellow">● Warning</span>'
     return ""
+
+
+# ============================================================
+# HIERARCHY METRICS: AGGREGATIONS
+# ============================================================
+@dataclass
+class HierarchyMetrics:
+    """Container for hierarchical budget metrics"""
+    customer: str
+    assigned_budget_cents: int
+    current_spend_cents: int
+    utilization: float
+    forecast_cents: int
+    alert_level: str
+
+
+def compute_customer_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Customer Level: assignedBudget, currentSpend, utilization
+    """
+    agg = df.groupby("customer", dropna=False).agg({
+        "total_budget_cents": "sum",
+        "total_spent_cents": "sum",
+    }).reset_index()
+    
+    agg["utilization"] = agg.apply(
+        lambda r: float(r["total_spent_cents"] / r["total_budget_cents"]) if r["total_budget_cents"] > 0 else 0.0,
+        axis=1
+    )
+    
+    return agg
+
+
+def compute_channel_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Channel Level: allocatedBudget, currentSpend, allocation %
+    """
+    agg = df.groupby("channel", dropna=False).agg({
+        "total_budget_cents": "sum",
+        "total_spent_cents": "sum",
+    }).reset_index()
+    
+    total_all_channels = agg["total_budget_cents"].sum()
+    
+    agg["utilization"] = agg.apply(
+        lambda r: float(r["total_spent_cents"] / r["total_budget_cents"]) if r["total_budget_cents"] > 0 else 0.0,
+        axis=1
+    )
+    
+    agg["allocation_pct"] = agg.apply(
+        lambda r: float(r["total_budget_cents"] / total_all_channels * 100) if total_all_channels > 0 else 0.0,
+        axis=1
+    )
+    
+    return agg
+
+
+def compute_campaign_group_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Campaign Group Level: assignedBudget, currentSpend
+    """
+    agg = df.groupby(["customer", "channel", "group"], dropna=False).agg({
+        "total_budget_cents": "sum",
+        "total_spent_cents": "sum",
+    }).reset_index()
+    
+    agg["utilization"] = agg.apply(
+        lambda r: float(r["total_spent_cents"] / r["total_budget_cents"]) if r["total_budget_cents"] > 0 else 0.0,
+        axis=1
+    )
+    
+    return agg
+
+
+def compute_campaign_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Campaign Level: totalBudget, dailyBudget, spentToDate, avgDailySpend
+    """
+    campaigns = df.copy()
+    
+    # Add calculated metrics
+    campaigns["daily_budget_cents"] = compute_daily_budget_cents(campaigns)
+    campaigns["avg_daily_spend_cents"] = compute_avg_daily_spend_cents(campaigns)
+    campaigns["utilization"] = compute_utilization(campaigns)
+    campaigns["forecast_cents"] = compute_forecast_cents(campaigns)
+    campaigns["active_days"] = compute_active_days(campaigns)
+    campaigns["remaining_days"] = compute_remaining_active_days(campaigns)
+    
+    # Compute alert level for each campaign
+    campaigns["alert_level"] = campaigns.apply(compute_alert_level, axis=1)
+    
+    return campaigns
 
 
 def money(cents: int) -> str:
@@ -583,7 +805,8 @@ with st.sidebar:
 
     with st.expander("Alerts & thresholds", expanded=False):
         st.session_state.alert_enabled = st.toggle("Enable alerts", value=st.session_state.alert_enabled)
-        st.session_state.alert_threshold = st.slider("Critical utilization threshold", 0.50, 1.00, float(st.session_state.alert_threshold), 0.01)
+        st.session_state.alert_threshold = st.slider("Critical utilization", 0.50, 1.00, float(st.session_state.alert_threshold), 0.01, format="%.0f%%")
+        st.session_state.forecast_threshold = st.slider("Forecast overrun", 1.00, 1.50, float(st.session_state.forecast_threshold), 0.01, format="%.0f%%")
         st.session_state.show_debug = st.toggle("Show debug panels", value=st.session_state.show_debug)
 
     st.markdown("---")
@@ -666,18 +889,39 @@ def page_budget_overview(df: pd.DataFrame):
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("###")
-    st.markdown("## Spend Tracker")
+    st.markdown("## Customer Utilization")
+    st.markdown('<div class="bv-muted">Spend vs. assigned budget per customer</div>', unsafe_allow_html=True)
+    st.markdown("##")
+    
+    # Customer-level hierarchy metrics
+    customer_metrics = compute_customer_metrics(df)
+    customer_metrics = customer_metrics[customer_metrics["customer"].str.strip() != ""].sort_values("total_spent_cents", ascending=False).head(8)
+    
+    if not customer_metrics.empty:
+        for _, r in customer_metrics.iterrows():
+            util = float(r["utilization"])
+            label = str(r["customer"])
+            right = f"{money(int(r['total_spent_cents']))} / {money(int(r['total_budget_cents']))}"
+            # Color-code by utilization: red if >90%, otherwise BV_RED
+            color = "#EF4444" if util >= 0.90 else BV_RED
+            progress_row(label, util, right, color=color)
+    
+    st.markdown("###")
+    st.markdown("## Spend Tracker by Channel")
+    st.markdown('<div class="bv-muted">Channel allocation % and utilization</div>', unsafe_allow_html=True)
+    st.markdown("##")
 
-    # Spend tracker per channel
-    ch = df.groupby("channel")[["total_budget_cents", "total_spent_cents"]].sum().reset_index()
-    ch["util"] = ch.apply(lambda r: float(r["total_spent_cents"] / r["total_budget_cents"]) if int(r["total_budget_cents"]) > 0 else 0.0, axis=1)
-    ch = ch.sort_values("total_spent_cents", ascending=False)
+    # Use hierarchical channel metrics
+    channel_metrics = compute_channel_metrics(df)
+    channel_metrics = channel_metrics.sort_values("total_spent_cents", ascending=False)
+    
     colors = {"LinkedIn": BV_RED, "Google": "#2563EB", "Meta": "#9333EA", "Other": "#94A3B8"}
-    for _, r in ch.iterrows():
-        util = float(r["util"])
-        label = str(r["channel"])
+    
+    for _, r in channel_metrics.iterrows():
+        util = float(r["utilization"])
+        label = f"{r['channel']} ({r['allocation_pct']:.1f}% of total)"
         right = f"{money(int(r['total_spent_cents']))} / {money(int(r['total_budget_cents']))}"
-        progress_row(label, util, right, color=colors.get(label, BV_RED))
+        progress_row(label, util, right, color=colors.get(r['channel'], BV_RED))
 
 
 # ============================================================
@@ -687,28 +931,23 @@ def page_spend_tracking(df: pd.DataFrame):
     st.markdown("## Spend Tracking")
     st.markdown('<div class="bv-muted">Campaign-level spend, forecast and utilization with alerts.</div>', unsafe_allow_html=True)
 
-    # Build campaign table
-    campaigns = (
+    # Build campaign table using enhanced metrics
+    campaigns_agg = (
         df.groupby(["channel", "campaign", "group"], dropna=False)[["total_budget_cents", "total_spent_cents"]]
         .sum()
         .reset_index()
     )
-    # join dates/status (best-effort)
+    
+    # Join dates/status (best-effort)
     meta = (
         df.groupby(["channel", "campaign", "group"], dropna=False)[["start_date", "end_date", "status"]]
         .agg({"start_date": "min", "end_date": "max", "status": "last"})
         .reset_index()
     )
-    campaigns = campaigns.merge(meta, on=["channel", "campaign", "group"], how="left")
-    campaigns["utilization"] = compute_utilization(campaigns)
-    campaigns["forecast_cents"] = compute_forecast_cents(campaigns)
-    campaigns["forecast_overrun"] = campaigns["forecast_cents"] > campaigns["total_budget_cents"]
-
-    # Alert badges
-    badges = []
-    for _, r in campaigns.iterrows():
-        badges.append(alert_badge(r.get("status", ""), float(r["utilization"]), bool(r["forecast_overrun"])))
-    campaigns["alert"] = badges
+    campaigns_base = campaigns_agg.merge(meta, on=["channel", "campaign", "group"], how="left")
+    
+    # Apply full business logic metrics
+    campaigns = compute_campaign_metrics(campaigns_base)
 
     # Status icon
     def status_icon(s: object) -> str:
@@ -717,13 +956,14 @@ def page_spend_tracking(df: pd.DataFrame):
             return "🟢"
         if "paused" in t or t in {"off"}:
             return "🟡"
-        if "stopped" in t:
+        if "stopped" in t or "ended" in t:
             return "🔴"
         return "⚪"
 
     campaigns["status_icon"] = campaigns["status"].apply(status_icon)
+    campaigns["alert_badge_html"] = campaigns["alert_level"].apply(alert_badge)
 
-    # Pretty columns
+    # Pretty columns with all calculated metrics
     table = pd.DataFrame(
         {
             "Status": campaigns["status_icon"],
@@ -731,9 +971,13 @@ def page_spend_tracking(df: pd.DataFrame):
             "Campaign Name": campaigns["campaign"],
             "Assigned Budget": campaigns["total_budget_cents"].apply(money),
             "Current Spend": campaigns["total_spent_cents"].apply(money),
+            "Daily Budget": campaigns["daily_budget_cents"].apply(lambda c: money(int(c))),
+            "Avg Daily Spend": campaigns["avg_daily_spend_cents"].apply(lambda c: money(int(c))),
             "Forecasted Spend": campaigns["forecast_cents"].apply(money),
             "Utilization": campaigns["utilization"].astype("float64"),
-            "Alerts": campaigns["alert"],
+            "Active Days": campaigns["active_days"].astype("int64"),
+            "Remaining": campaigns["remaining_days"].astype("int64"),
+            "Alerts": campaigns["alert_badge_html"],
         }
     ).sort_values("Current Spend", ascending=False)
 
@@ -745,11 +989,13 @@ def page_spend_tracking(df: pd.DataFrame):
         column_config={
             "Utilization": st.column_config.ProgressColumn(
                 "Utilization",
-                help="Spend / Budget",
+                help="(spentToDate / totalBudget) × 100",
                 format="%.0f%%",
                 min_value=0.0,
                 max_value=1.2,
             ),
+            "Active Days": st.column_config.NumberColumn("Active Days", help="Total days - paused days"),
+            "Remaining": st.column_config.NumberColumn("Days Left", help="Days remaining until end_date"),
             "Alerts": st.column_config.TextColumn("Alerts"),
         },
     )
@@ -760,8 +1006,8 @@ def page_spend_tracking(df: pd.DataFrame):
     # Area chart: approximate cumulative series using budget/spend spread over time
     today = pd.Timestamp.today().normalize()
     # Use the largest active window from data as chart horizon
-    min_start = pd.to_datetime(df["start_date"], errors="coerce").min()
-    max_end = pd.to_datetime(df["end_date"], errors="coerce").max()
+    min_start = pd.to_datetime(parse_date(df["start_date"]), errors="coerce").min()
+    max_end = pd.to_datetime(parse_date(df["end_date"]), errors="coerce").max()
     if pd.isna(min_start) or pd.isna(max_end):
         st.info("Not enough date coverage to build cumulative chart.")
         return
@@ -828,7 +1074,10 @@ def page_simulation(df: pd.DataFrame):
     st.markdown("## Simulation")
     st.markdown('<div class="bv-muted">Adjust budgets by platform and compare allocation.</div>', unsafe_allow_html=True)
 
-    base = df.groupby("channel")["total_budget_cents"].sum().reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
+    # Get channel metrics for base values
+    channel_metrics = compute_channel_metrics(df)
+    base = channel_metrics.set_index("channel")["total_budget_cents"].reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
+    base_spend = channel_metrics.set_index("channel")["total_spent_cents"].reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
 
     def base_money(ch: str) -> Decimal:
         return round2(Decimal(int(base.get(ch, 0))) / Decimal(100))
@@ -837,18 +1086,43 @@ def page_simulation(df: pd.DataFrame):
     cols = st.columns(3)
     channels = ["LinkedIn", "Google", "Meta"]
     sim: dict[str, int] = {}
+    
     for i, ch in enumerate(channels):
         with cols[i]:
             st.markdown(f'<div class="bv-card"><div class="bv-kpi-label">{ch}</div>', unsafe_allow_html=True)
             orig = base_money(ch)
-            amt = st.number_input(f"{ch} amount", min_value=0.0, value=float(orig), step=50.0, key=f"sim-amt-{ch}")
-            pct = st.slider(f"{ch} change", min_value=-50, max_value=100, value=0, step=1, key=f"sim-pct-{ch}")
-            # numeric is the base; slider applies on top (so user can do both)
+            current_spend = round2(Decimal(int(base_spend.get(ch, 0))) / Decimal(100))
+            
+            amt = st.number_input(
+                f"{ch} amount (SEK)", 
+                min_value=0.0, 
+                value=float(orig), 
+                step=50.0, 
+                key=f"sim-amt-{ch}",
+                help=f"Current spend: {current_spend:,.2f} SEK"
+            )
+            pct = st.slider(
+                f"{ch} change %", 
+                min_value=-50, 
+                max_value=100, 
+                value=0, 
+                step=5, 
+                key=f"sim-pct-{ch}"
+            )
+            
+            # Apply percentage change to the input amount
             simulated = Decimal(str(amt)) * (Decimal(100 + int(pct)) / Decimal(100))
             sim[ch] = int(round2(simulated) * 100)
+            
+            delta_cents = int(round2(simulated) * 100) - int(base.get(ch, 0))
+            delta_sign = "+" if delta_cents >= 0 else "−"
+            
             st.markdown(
-                f'<div class="bv-muted" style="margin-top:8px;">Original → Simulated</div>'
+                f'<div class="bv-muted" style="margin-top:8px;">Current Spend</div>'
+                f'<div style="font-size:14px; font-weight:700; margin-bottom:8px;">{current_spend:,.2f} SEK</div>'
+                f'<div class="bv-muted">Original → Simulated</div>'
                 f'<div style="font-family:Space Grotesk; font-weight:800; font-size:20px;">{orig:,.2f} → {round2(simulated):,.2f}</div>'
+                f'<div class="bv-muted" style="margin-top:6px; font-size:12px;">{delta_sign}{money(abs(delta_cents))}</div>'
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -861,11 +1135,12 @@ def page_simulation(df: pd.DataFrame):
     st.markdown("###")
     k1, k2, k3 = st.columns(3)
     with k1:
-        kpi_card("Original Total", money(original_total))
+        kpi_card("Original Total", f"{money(original_total)} SEK", sub="Current allocation")
     with k2:
-        kpi_card("Simulated Total", money(simulated_total))
+        kpi_card("Simulated Total", f"{money(simulated_total)} SEK", sub="After adjustments")
     with k3:
-        kpi_card("Delta", f"{sign}{money(abs(delta))}", sub="Simulated − Original")
+        delta_pct = (float(delta) / float(original_total) * 100) if original_total > 0 else 0.0
+        kpi_card("Delta", f"{sign}{money(abs(delta))} SEK", sub=f"{delta_pct:+.1f}%")
 
     st.markdown("###")
     left, right = st.columns([1, 1])
@@ -881,6 +1156,28 @@ def page_simulation(df: pd.DataFrame):
         vega_donut(sim_vals, "Simulated Allocation", color_domain=channels, color_range=[BV_RED, "#2563EB", "#9333EA"])
         st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown("###")
+    st.markdown("## Comparison Summary")
+    
+    # Summary table
+    summary_data = []
+    for ch in channels:
+        orig_cents = int(base.get(ch, 0))
+        sim_cents = int(sim.get(ch, 0))
+        delta_cents = sim_cents - orig_cents
+        delta_pct = (float(delta_cents) / float(orig_cents) * 100) if orig_cents > 0 else 0.0
+        
+        summary_data.append({
+            "Platform": ch,
+            "Original Budget": f"{money(orig_cents)} SEK",
+            "Simulated Budget": f"{money(sim_cents)} SEK",
+            "Delta": f"{'+' if delta_cents >= 0 else '−'}{money(abs(delta_cents))} SEK",
+            "Change %": f"{delta_pct:+.1f}%"
+        })
+    
+    summary_df = pd.DataFrame(summary_data)
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    
     st.markdown("###")
     # Comparison bar
     bar_vals = []
@@ -899,11 +1196,56 @@ def page_settings():
     st.markdown("## Settings")
     st.markdown('<div class="bv-muted">Configure alerts and data diagnostics.</div>', unsafe_allow_html=True)
     st.markdown("###")
+    
+    st.markdown("### Alert Configuration")
     st.session_state.alert_enabled = st.toggle("Enable alerts", value=st.session_state.alert_enabled)
-    st.session_state.alert_threshold = st.slider("Critical utilization threshold", 0.50, 1.00, float(st.session_state.alert_threshold), 0.01)
-    st.session_state.show_debug = st.toggle("Show debug panels", value=st.session_state.show_debug)
+    
+    st.markdown("**Budget Warning Threshold**")
+    st.caption("Trigger 'Critical' alert when Utilization ≥ this value")
+    st.session_state.alert_threshold = st.slider(
+        "Critical utilization threshold", 
+        0.50, 1.00, 
+        float(st.session_state.alert_threshold), 
+        0.01,
+        format="%.0f%%"
+    )
+    
+    st.markdown("**Forecast Overrun Threshold**")
+    st.caption("Trigger 'Warning' alert when Forecasted Spend exceeds budget by this ratio")
+    st.session_state.forecast_threshold = st.slider(
+        "Forecast overrun threshold", 
+        1.00, 1.50, 
+        float(st.session_state.forecast_threshold), 
+        0.01,
+        format="%.0f%%",
+        help="1.05 = 5% overrun"
+    )
+    
     st.markdown("###")
-    st.markdown('<div class="bv-card"><div class="bv-kpi-label">Data Source</div><div style="font-weight:700; margin-top:6px;">Local CSV files: <code>Copy of Budgets*.csv</code></div></div>', unsafe_allow_html=True)
+    st.markdown("### Advanced Options")
+    st.session_state.show_debug = st.toggle("Show debug panels", value=st.session_state.show_debug)
+    
+    st.markdown("###")
+    st.markdown("### Data Source")
+    st.markdown('<div class="bv-card"><div class="bv-kpi-label">CSV Files</div><div style="font-weight:700; margin-top:6px;">Local files: <code>Copy of Budgets*.csv</code></div><div class="bv-muted" style="margin-top:8px; font-size:13px;">All calculations are performed in real-time from these files</div></div>', unsafe_allow_html=True)
+    
+    st.markdown("###")
+    st.markdown("### Business Logic")
+    st.markdown("""
+<div class="bv-card">
+  <div class="bv-kpi-label">Active Calculations</div>
+  <ul style="margin-top:10px; font-size:13px; line-height:1.7;">
+    <li><strong>Utilization %</strong> = (spentToDate / totalBudget) × 100</li>
+    <li><strong>Forecasted Spend</strong> = spentToDate + (avgDailySpend × activeDaysRemaining)</li>
+    <li><strong>Active Days</strong> = totalDays - pausedDays</li>
+    <li><strong>Channel Allocation %</strong> = (channelBudget / totalAllChannels) × 100</li>
+    <li><strong>Customer Utilization</strong> = Sum of all group spends vs. total assigned budget</li>
+  </ul>
+  <div class="bv-muted" style="margin-top:12px; font-size:13px;">
+    All monetary values displayed in <strong>SEK</strong> with <strong>2 decimal precision</strong>.
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # ============================================================

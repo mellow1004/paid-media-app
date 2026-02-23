@@ -64,7 +64,7 @@ export function MetricCard({
               <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${getTrendColor()}`}>
                 {getTrendIcon()}
                 {change !== undefined && (
-                  <span>{change > 0 ? '+' : ''}{change.toFixed(1)}%</span>
+                  <span>{change > 0 ? '+' : ''}{change.toFixed(2)}%</span>
                 )}
               </span>
               {changeLabel && (

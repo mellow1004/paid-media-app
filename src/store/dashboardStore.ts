@@ -1,15 +1,13 @@
 import { create } from 'zustand';
 import type { CampaignStatus, Customer, Channel } from '../types';
-import { 
-  mockCustomers,
-  mockChannels, 
-  mockCampaignGroups 
-} from '../data/mockData';
+import type { CampaignGroup } from '../types';
+import { dataset } from '../data/dataset';
 
 interface DashboardStore {
   // Data
   customers: Customer[];
   channels: Channel[];
+  campaignGroups: CampaignGroup[];
   
   // Filters
   selectedCustomerId: string | null;
@@ -24,13 +22,14 @@ interface DashboardStore {
   
   // Helpers
   getChannelsByCustomer: (customerId: string) => Channel[];
-  getCampaignGroupsByChannel: (channelId: string) => typeof mockCampaignGroups;
+  getCampaignGroupsByChannel: (channelId: string) => CampaignGroup[];
 }
 
 export const useDashboardStore = create<DashboardStore>((set) => ({
-  // Initialize with mock data
-  customers: mockCustomers,
-  channels: mockChannels,
+  // Initialize with CSV-built data
+  customers: dataset.customers,
+  channels: dataset.channels,
+  campaignGroups: dataset.campaignGroups,
   
   // Filter state
   selectedCustomerId: null,
@@ -60,10 +59,10 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
   
   // Helper functions
   getChannelsByCustomer: (customerId: string) => {
-    return mockChannels.filter(c => c.customer_id === customerId);
+    return dataset.channels.filter(c => c.customer_id === customerId);
   },
   
   getCampaignGroupsByChannel: (channelId: string) => {
-    return mockCampaignGroups.filter(g => g.channel_id === channelId);
+    return dataset.campaignGroups.filter(g => g.channel_id === channelId);
   },
 }));

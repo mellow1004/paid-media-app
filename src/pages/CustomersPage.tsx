@@ -5,14 +5,14 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Users, Building2, DollarSign, TrendingUp } from 'lucide-react';
 
 export function CustomersPage() {
-  const { customers } = useDashboardStore();
+  const { customers, channels, campaignGroups } = useDashboardStore();
   const { campaigns } = useCampaignStore();
 
   // Calculate stats per customer
   const customerStats = customers.map(customer => {
-    // For demo, distribute campaigns evenly across customers
-    const customerIndex = customers.findIndex(c => c.customer_id === customer.customer_id);
-    const campaignsForCustomer = campaigns.filter((_, idx) => idx % customers.length === customerIndex);
+    const channelIds = new Set(channels.filter(ch => ch.customer_id === customer.customer_id).map(ch => ch.channel_id));
+    const groupIds = new Set(campaignGroups.filter(g => channelIds.has(g.channel_id)).map(g => g.group_id));
+    const campaignsForCustomer = campaigns.filter(c => groupIds.has(c.group_id));
     
     const totalBudget = campaignsForCustomer.reduce((sum, c) => sum + c.total_budget, 0);
     const totalSpend = campaignsForCustomer.reduce((sum, c) => sum + c.actual_spend, 0);
@@ -64,7 +64,7 @@ export function CustomersPage() {
           </div>
           <div>
             <p className="text-2xl font-display font-bold text-foreground">
-              {formatCurrency(totalBudget, 'SEK').replace(' kr', '')}
+              {formatCurrency(totalBudget, 'SEK')}
             </p>
             <p className="text-sm text-muted-foreground">Total Budget</p>
           </div>
@@ -76,7 +76,7 @@ export function CustomersPage() {
           </div>
           <div>
             <p className="text-2xl font-display font-bold text-foreground">
-              {formatCurrency(totalSpend, 'SEK').replace(' kr', '')}
+              {formatCurrency(totalSpend, 'SEK')}
             </p>
             <p className="text-sm text-muted-foreground">Total Spend</p>
           </div>
@@ -87,7 +87,7 @@ export function CustomersPage() {
             <Building2 className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-2xl font-display font-bold text-foreground">{avgUtilization.toFixed(0)}%</p>
+            <p className="text-2xl font-display font-bold text-foreground">{avgUtilization.toFixed(2)}%</p>
             <p className="text-sm text-muted-foreground">Avg Utilization</p>
           </div>
         </div>
@@ -168,7 +168,7 @@ export function CustomersPage() {
                         <div className="w-16 h-2 overflow-hidden rounded-full bg-muted">
                           <div 
                             className={`h-full transition-all duration-300 rounded-full ${
-                              customer.utilization >= 95 ? 'bg-destructive' :
+                              customer.utilization >= 100 ? 'bg-destructive' :
                               customer.utilization >= 90 ? 'bg-warning' :
                               'bg-success'
                             }`}
@@ -176,11 +176,11 @@ export function CustomersPage() {
                           />
                         </div>
                         <span className={`text-sm font-medium ${
-                          customer.utilization >= 95 ? 'text-destructive' :
+                          customer.utilization >= 100 ? 'text-destructive' :
                           customer.utilization >= 90 ? 'text-warning-600' :
                           'text-success'
                         }`}>
-                          {customer.utilization.toFixed(0)}%
+                          {customer.utilization.toFixed(2)}%
                         </span>
                       </div>
                     </td>

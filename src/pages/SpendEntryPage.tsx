@@ -75,7 +75,7 @@ export function SpendEntryPage() {
   };
 
   const getUtilizationColor = (utilization: number) => {
-    if (utilization >= 95) return 'text-destructive';
+    if (utilization >= 100) return 'text-destructive';
     if (utilization >= 90) return 'text-warning-600';
     return 'text-success';
   };
@@ -222,7 +222,7 @@ export function SpendEntryPage() {
                       </td>
                       <td className="px-6 py-4 text-right">
                         <span className={`font-medium ${getUtilizationColor(utilization)}`}>
-                          {utilization.toFixed(1)}%
+                          {utilization.toFixed(2)}%
                         </span>
                       </td>
                       <td className="px-6 py-4">

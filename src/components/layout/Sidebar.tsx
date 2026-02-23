@@ -1,26 +1,28 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
+import { useDashboardStore } from '../../store/dashboardStore';
 import { 
   BarChart3, 
-  LayoutDashboard, 
+  BarChart4,
   Receipt, 
   Settings, 
+  Users,
   LogOut,
   ChevronRight
 } from 'lucide-react';
 
 const mainNavItems = [
   { 
-    to: '/dashboard', 
-    icon: LayoutDashboard, 
-    label: 'Budget Overview',
-    description: 'Monitor budgets'
-  },
-  { 
     to: '/spend-entry', 
     icon: Receipt, 
     label: 'Spend Tracking',
     description: 'Track spending'
+  },
+  { 
+    to: '/forecasting', 
+    icon: BarChart4, 
+    label: 'Forecasting',
+    description: 'Simulate budgets'
   },
 ];
 
@@ -41,6 +43,7 @@ const dataSources = [
 
 export function Sidebar() {
   const { user, logout } = useAuthStore();
+  const { customers } = useDashboardStore();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -101,6 +104,45 @@ export function Sidebar() {
               )}
             </NavLink>
           ))}
+        </div>
+
+        {/* Customers (drill-down entry point) */}
+        <div className="mt-6 space-y-1">
+          <p className="px-3 py-2 text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+            <Users className="w-4 h-4" />
+            Customers
+          </p>
+          <div className="space-y-1">
+            {customers.map((c) => (
+              <NavLink
+                key={c.customer_id}
+                to={`/customers/${c.customer_id}`}
+                className={({ isActive }) =>
+                  `group flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                    isActive
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                  }`
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full ${
+                        isActive ? 'bg-primary' : 'bg-muted-foreground/40 group-hover:bg-foreground/40'
+                      }`}
+                    />
+                    <span className="flex-1 truncate">{c.name}</span>
+                    <ChevronRight
+                      className={`w-4 h-4 opacity-0 -translate-x-2 transition-all ${
+                        isActive ? 'opacity-100 translate-x-0' : 'group-hover:opacity-50 group-hover:translate-x-0'
+                      }`}
+                    />
+                  </>
+                )}
+              </NavLink>
+            ))}
+          </div>
         </div>
 
         {/* Data Sources Section */}
