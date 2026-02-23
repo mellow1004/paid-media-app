@@ -4,6 +4,7 @@ import { v5 as uuidv5 } from 'uuid';
 
 import type { Campaign, CampaignGroup, CampaignStatus, Channel, ChannelName, Customer } from '../types';
 import { csvSources } from './csvSources';
+import type { CsvSource } from './csvSources';
 
 export interface SimulationBaseline {
   totalBudget: number;
@@ -248,12 +249,12 @@ function ensureDates(start: Date | undefined, end: Date | undefined): { start: D
   return { start: startDate, end: endDate };
 }
 
-export function buildDatasetFromCsv(): CsvDataset {
+export function buildDatasetFromCsvSources(sources: CsvSource[]): CsvDataset {
   const now = new Date();
 
   const accByKey = new Map<string, CampaignAccumulator>();
 
-  for (const source of csvSources) {
+  for (const source of sources) {
     const rows = parseCsvToRows(source.content);
     for (const row of rows) {
       if (rowContainsNoise(row)) continue;
@@ -413,5 +414,9 @@ export function buildDatasetFromCsv(): CsvDataset {
     campaigns,
     simulationBaselinesByCampaignId,
   };
+}
+
+export function buildDatasetFromCsv(): CsvDataset {
+  return buildDatasetFromCsvSources(csvSources);
 }
 

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { MetricCard } from '../components/dashboard/MetricCard';
 import { BudgetUtilizationChart } from '../components/dashboard/BudgetUtilizationChart';
 import { CustomerBudgetChart } from '../components/dashboard/CustomerBudgetChart';
@@ -7,10 +7,16 @@ import { FilterBar } from '../components/dashboard/FilterBar';
 import { useCampaignStore } from '../store/campaignStore';
 import { useDashboardStore } from '../store/dashboardStore';
 import { formatCurrency } from '../utils/formatters';
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/Card';
+import type { CsvSource } from '../data/csvSources';
+import { buildDatasetFromCsvSources } from '../data/buildDatasetFromCsv';
 
 export function DashboardPage() {
-  const { campaigns, alerts } = useCampaignStore();
-  const { customers } = useDashboardStore();
+  const { campaigns, alerts, mergeInDataset: mergeCampaignDataset, resetToBaseDataset: resetCampaignDataset } = useCampaignStore();
+  const { customers, mergeInDataset: mergeDashboardDataset, resetToBaseDataset: resetDashboardDataset } = useDashboardStore();
+  const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   
   const currency = customers[0]?.currency || 'SEK';
 
@@ -51,6 +57,89 @@ export function DashboardPage() {
           </p>
         </div>
       </div>
+
+      {/* CSV Upload */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle>Import CSV (additive)</CardTitle>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                resetCampaignDataset();
+                resetDashboardDataset();
+                setUploadedFiles([]);
+                setUploadError(null);
+              }}
+              className="h-9 px-3 rounded-lg text-sm font-medium border border-border bg-card text-foreground hover:bg-muted/30 transition-colors"
+            >
+              Reset to bundled data
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center gap-4">
+            <div className="flex-1">
+              <input
+                type="file"
+                multiple
+                accept=".csv"
+                disabled={isUploading}
+                onChange={async (e) => {
+                  const files = Array.from(e.target.files ?? []);
+                  if (files.length === 0) return;
+
+                  setIsUploading(true);
+                  setUploadError(null);
+                  try {
+                    const contents = await Promise.all(files.map((f) => f.text()));
+                    const sources: CsvSource[] = files.map((f, i) => ({
+                      filename: f.name,
+                      content: contents[i] ?? '',
+                    }));
+
+                    const added = buildDatasetFromCsvSources(sources);
+                    mergeDashboardDataset(added);
+                    mergeCampaignDataset(added);
+
+                    setUploadedFiles((prev) => Array.from(new Set([...prev, ...files.map((f) => f.name)])));
+                  } catch (err) {
+                    setUploadError(err instanceof Error ? err.message : 'Failed to import CSV files.');
+                  } finally {
+                    setIsUploading(false);
+                    // Allow re-uploading same files
+                    e.target.value = '';
+                  }
+                }}
+                className="block w-full text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-primary/10 file:text-primary hover:file:bg-primary/20"
+              />
+              <p className="text-xs text-muted-foreground mt-2">
+                Upload one or multiple CSV files. They will be parsed with the same sanitization + mapping rules and added to the existing dataset.
+              </p>
+            </div>
+
+            <div className="min-w-[220px]">
+              <div className="p-3 rounded-lg bg-muted/20 border border-border/50">
+                <p className="text-xs text-muted-foreground">Imported files</p>
+                <p className="text-lg font-semibold text-foreground">{uploadedFiles.length.toFixed(0)}</p>
+                {isUploading && <p className="text-xs text-muted-foreground mt-1">Importing…</p>}
+              </div>
+            </div>
+          </div>
+
+          {uploadError && (
+            <div className="p-3 rounded-lg border border-destructive/20 bg-destructive/5 text-sm text-destructive">
+              {uploadError}
+            </div>
+          )}
+
+          {uploadedFiles.length > 0 && (
+            <div className="text-xs text-muted-foreground">
+              {uploadedFiles.slice(0, 6).join(', ')}
+              {uploadedFiles.length > 6 ? ` … +${uploadedFiles.length - 6} more` : ''}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Filters */}
       <FilterBar />

@@ -4,6 +4,7 @@ import { useDashboardStore } from '../../store/dashboardStore';
 import { 
   BarChart3, 
   BarChart4,
+  LayoutDashboard,
   Receipt, 
   Settings, 
   Users,
@@ -12,6 +13,12 @@ import {
 } from 'lucide-react';
 
 const mainNavItems = [
+  { 
+    to: '/dashboard', 
+    icon: LayoutDashboard, 
+    label: 'Budget Overview',
+    description: 'Monitor budgets'
+  },
   { 
     to: '/spend-entry', 
     icon: Receipt, 

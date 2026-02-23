@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { MainLayout } from './components/layout/MainLayout';
 import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { SpendEntryPage } from './pages/SpendEntryPage';
 import { CustomerOverviewPage } from './pages/CustomerOverviewPage';
@@ -8,10 +9,6 @@ import { PlatformDetailPage } from './pages/PlatformDetailPage';
 import { GoogleAdsAdsPage } from './pages/GoogleAdsAdsPage';
 import { ForecastingPage } from './pages/ForecastingPage';
 import { CustomersIndexPage } from './pages/CustomersIndexPage';
-
-function DashboardRedirect() {
-  return <Navigate to="/customers" replace />;
-}
 
 function App() {
   return (
@@ -22,7 +19,7 @@ function App() {
         
         {/* Protected routes */}
         <Route element={<MainLayout />}>
-          <Route path="/dashboard" element={<DashboardRedirect />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
 
           {/* Hierarchical drill-down */}
           <Route path="/customers" element={<CustomersIndexPage />} />

@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Campaign, PauseWindow, Alert } from '../types';
 import { dataset } from '../data/dataset';
+import type { CsvDataset } from '../data/buildDatasetFromCsv';
 import { 
   calculateDailyBudget, 
   forecastTotalSpend, 
@@ -10,6 +11,7 @@ import {
 import type { ForecastResult, AlertCheck } from '../utils/budgetCalculations';
 import { v4 as uuidv4 } from 'uuid';
 import type { SimulationBaseline } from '../data/buildDatasetFromCsv';
+import { mergeCampaign, mergeSimulationBaselines } from '../data/mergeDatasets';
 
 
 interface CampaignStore {
@@ -52,6 +54,53 @@ interface CampaignStore {
     customerName: string | undefined;
     pauseWindows: PauseWindow[];
   };
+
+  // CSV upload integration
+  mergeInDataset: (added: CsvDataset) => void;
+  resetToBaseDataset: () => void;
+}
+
+function buildAlertsForCampaigns(campaigns: Campaign[]): Alert[] {
+  return campaigns.flatMap((c) => {
+    const check = checkCampaignAlerts(c, []);
+    const out: Alert[] = [];
+    if (check.shouldTriggerUtilizationCritical) {
+      out.push({
+        alert_id: uuidv4(),
+        campaign_id: c.campaign_id,
+        type: 'critical',
+        message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Immediate action required.`,
+        threshold: 100,
+        current_value: check.utilizationPercent,
+        is_read: false,
+        created_at: new Date(),
+      });
+    } else if (check.shouldTriggerUtilizationWarning) {
+      out.push({
+        alert_id: uuidv4(),
+        campaign_id: c.campaign_id,
+        type: 'warning',
+        message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Consider reviewing budget allocation.`,
+        threshold: 90,
+        current_value: check.utilizationPercent,
+        is_read: false,
+        created_at: new Date(),
+      });
+    }
+    if (check.shouldTriggerStatusAlert) {
+      out.push({
+        alert_id: uuidv4(),
+        campaign_id: c.campaign_id,
+        type: 'info',
+        message: `Status alert: campaign is PAUSED while within active flight dates.`,
+        threshold: 0,
+        current_value: 0,
+        is_read: false,
+        created_at: new Date(),
+      });
+    }
+    return out;
+  });
 }
 
 export const useCampaignStore = create<CampaignStore>()(
@@ -60,46 +109,7 @@ export const useCampaignStore = create<CampaignStore>()(
       // Initialize with CSV-built data
       campaigns: dataset.campaigns.map(c => ({ ...c })),
       pauseWindows: [],
-      alerts: dataset.campaigns.flatMap((c) => {
-        const check = checkCampaignAlerts(c, []);
-        const out: Alert[] = [];
-        if (check.shouldTriggerUtilizationCritical) {
-          out.push({
-            alert_id: uuidv4(),
-            campaign_id: c.campaign_id,
-            type: 'critical',
-            message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Immediate action required.`,
-            threshold: 100,
-            current_value: check.utilizationPercent,
-            is_read: false,
-            created_at: new Date(),
-          });
-        } else if (check.shouldTriggerUtilizationWarning) {
-          out.push({
-            alert_id: uuidv4(),
-            campaign_id: c.campaign_id,
-            type: 'warning',
-            message: `Budget utilization has reached ${check.utilizationPercent.toFixed(2)}%. Consider reviewing budget allocation.`,
-            threshold: 90,
-            current_value: check.utilizationPercent,
-            is_read: false,
-            created_at: new Date(),
-          });
-        }
-        if (check.shouldTriggerStatusAlert) {
-          out.push({
-            alert_id: uuidv4(),
-            campaign_id: c.campaign_id,
-            type: 'info',
-            message: `Status alert: campaign is PAUSED while within active flight dates.`,
-            threshold: 0,
-            current_value: 0,
-            is_read: false,
-            created_at: new Date(),
-          });
-        }
-        return out;
-      }),
+      alerts: buildAlertsForCampaigns(dataset.campaigns),
       simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
       
       getCampaign: (campaignId: string) => {
@@ -327,6 +337,33 @@ export const useCampaignStore = create<CampaignStore>()(
           customerName: customer?.name, 
           pauseWindows 
         };
+      },
+
+      mergeInDataset: (added) => {
+        const baseCampaigns = get().campaigns;
+        const map = new Map<string, Campaign>(baseCampaigns.map(c => [c.campaign_id, c]));
+        for (const c of added.campaigns) {
+          const existing = map.get(c.campaign_id);
+          map.set(c.campaign_id, existing ? mergeCampaign(existing, c) : c);
+        }
+
+        const mergedCampaigns = Array.from(map.values());
+        const mergedBaselines = mergeSimulationBaselines(get().simulationByCampaignId, added.simulationBaselinesByCampaignId);
+
+        set({
+          campaigns: mergedCampaigns,
+          simulationByCampaignId: mergedBaselines,
+          alerts: buildAlertsForCampaigns(mergedCampaigns),
+        });
+      },
+
+      resetToBaseDataset: () => {
+        set({
+          campaigns: dataset.campaigns.map(c => ({ ...c })),
+          pauseWindows: [],
+          simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
+          alerts: buildAlertsForCampaigns(dataset.campaigns),
+        });
       },
     }),
     {
