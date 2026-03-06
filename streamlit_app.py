@@ -1057,8 +1057,10 @@ with st.sidebar:
     if not data.empty and "customer" in data.columns:
         customers = ["All"] + sorted([c for c in data["customer"].unique().tolist() if str(c).strip() != ""])
     channels = ["All", "LinkedIn", "Google", "Meta", "Other"]
-    selected_customer = st.selectbox("Customer", options=customers, index=0)
-    selected_channel = st.selectbox("Channel", options=channels, index=0)
+    has_customer = (not data.empty) and ("customer" in data.columns)
+    has_channel = (not data.empty) and ("channel" in data.columns)
+    selected_customer = st.selectbox("Customer", options=customers, index=0, disabled=not has_customer)
+    selected_channel = st.selectbox("Channel", options=channels, index=0, disabled=not has_channel)
 
     st.markdown("---")
 
@@ -1080,9 +1082,9 @@ with st.sidebar:
 
 # Apply filters
 filtered = data.copy() if not data.empty else pd.DataFrame()
-if selected_customer != "All":
+if selected_customer != "All" and (not filtered.empty) and ("customer" in filtered.columns):
     filtered = filtered.loc[filtered["customer"] == selected_customer].copy()
-if selected_channel != "All":
+if selected_channel != "All" and (not filtered.empty) and ("channel" in filtered.columns):
     filtered = filtered.loc[filtered["channel"] == selected_channel].copy()
 
 
