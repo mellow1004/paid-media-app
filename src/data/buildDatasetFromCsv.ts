@@ -188,8 +188,11 @@ function normalizeCampaignKey(customerName: string, channelName: ChannelName, gr
 
 function pick(row: AnyRow, keys: string[]): string {
   for (const k of keys) {
-    const v = row[k];
-    if (v !== undefined && normalizeText(v) !== '') return v;
+    const variants = [k, k.replace(/_/g, ' '), k.replace(/ /g, '_')];
+    for (const key of variants) {
+      const v = row[key];
+      if (v !== undefined && normalizeText(v) !== '') return v;
+    }
   }
   return '';
 }
@@ -215,6 +218,9 @@ type CampaignAccumulator = {
   channelName: ChannelName;
   groupName: string;
   campaignName: string;
+  groupExternalId?: string;
+  campaignExternalId?: string;
+  currency?: string;
   status?: CampaignStatus;
   startDate?: Date;
   endDate?: Date;
@@ -226,7 +232,15 @@ type CampaignAccumulator = {
 };
 
 function parseStatus(row: AnyRow): CampaignStatus {
-  const statusRaw = `${pick(row, ['status', 'current status'])} ${pick(row, ['off/on'])}`.toLowerCase();
+  const statusRaw = `${pick(row, [
+    'ad_set_status_internal',
+    'campaign_group_status_internal',
+    'ad_set_status_platform',
+    'campaign_group_status_platform',
+    // LinkedIn exports
+    'status',
+    'current status',
+  ])} ${pick(row, ['off/on'])}`.toLowerCase();
 
   if (statusRaw.includes('complete') || statusRaw.includes('completed') || statusRaw.includes('draft') || statusRaw.includes('stopped')) {
     return 'stopped';
@@ -265,53 +279,91 @@ export function buildDatasetFromCsvSources(sources: CsvSource[]): CsvDataset {
 
       const groupName = normalizeText(
         split?.group ||
-          pick(row, ['campaign group', 'campaign group name', 'group'])
+          pick(row, ['campaign_group_name', 'campaign group', 'campaign group name', 'group'])
       );
 
       const campaignName = normalizeText(
         split?.campaign ||
-          pick(row, ['campaign name', 'campaign'])
+          pick(row, ['ad_set_name', 'campaign name', 'campaign'])
       );
 
       if (!campaignName) continue; // required
 
-      const customerName = inferCustomer(source.filename, groupName, campaignName);
-      const platform = pick(row, ['platform']);
+      const accountId = normalizeText(pick(row, ['account_id', 'account id']));
+      const customerName = accountId || inferCustomer(source.filename, groupName, campaignName);
+      // Platform determination:
+      // - For uploads we require the user to confirm the platform per-file (platformOverride)
+      // - If absent (bundled baseline), fall back to explicit "platform" column then heuristics.
+      const platform = source.platformOverride || pick(row, ['platform']);
       const channelName = inferChannelName(source.filename, groupName, campaignName, platform);
 
       const normalized = normalizeGroupCampaign(customerName, groupName, campaignName);
-      const key = normalizeCampaignKey(customerName, channelName, normalized.groupName || 'Uncategorized', normalized.campaignName);
+      const groupExternalId = normalizeText(pick(row, ['campaign_group_id', 'campaign group id']));
+      const campaignExternalId = normalizeText(pick(row, ['ad_set_id', 'ad set id']));
+
+      const key = campaignExternalId
+        ? `${customerName}|${channelName}|adset:${campaignExternalId}`.toLowerCase()
+        : normalizeCampaignKey(customerName, channelName, normalized.groupName || 'Uncategorized', normalized.campaignName);
       const existing = accByKey.get(key) ?? {
         customerName,
         channelName,
         groupName: normalized.groupName || 'Uncategorized',
         campaignName: normalized.campaignName,
+        groupExternalId: groupExternalId || undefined,
+        campaignExternalId: campaignExternalId || undefined,
       };
+
+      // Currency (LinkedIn export: "Currency")
+      const currency = normalizeText(pick(row, ['currency']));
+      existing.currency = existing.currency ?? (currency || undefined);
 
       // Status
       const status = parseStatus(row);
       existing.status = existing.status ?? status;
 
       // Dates
+      // LinkedIn exports (and many other sheets) use "Start Date" / "End Date"
       const startDate = parseDate(pick(row, ['start date']));
       const endDate = parseDate(pick(row, ['end date', 'the end date']));
+      const startDate2 = parseDate(pick(row, ['ad_set_start_date', 'campaign_group_start_date']));
+      const endDate2 = parseDate(pick(row, ['ad_set_end_date', 'campaign_group_end_date']));
       existing.startDate = existing.startDate ?? startDate ?? undefined;
       existing.endDate = existing.endDate ?? endDate ?? undefined;
+      existing.startDate = existing.startDate ?? startDate2 ?? undefined;
+      existing.endDate = existing.endDate ?? endDate2 ?? undefined;
 
       // Spent
-      const spent = parseNumber(pick(row, ['spent', 'total spent', 'current budget utilisation', 'already spend', 'spent to date']));
+      // LinkedIn export: "Amount Spent"
+      const spent = parseNumber(
+        pick(row, ['amount spent', 'spent', 'total spent', 'current budget utilisation', 'already spend', 'spent to date'])
+      );
       if (spent > 0) existing.spentToDate = Math.max(existing.spentToDate ?? 0, spent);
+      const spent2 = parseNumber(pick(row, ['ad_set_spend_to_date', 'campaign_group_spend_to_date']));
+      if (spent2 > 0) existing.spentToDate = Math.max(existing.spentToDate ?? 0, spent2);
 
       // Budgets (current/original)
       const currentTotalBudget = parseNumber(
+        // LinkedIn export: "Lifetime Budget"
         pick(row, ['lifetime budget', 'current budget total', 'current total', 'current budget', 'current budget  total'])
       );
       if (currentTotalBudget > 0) existing.totalBudget = Math.max(existing.totalBudget ?? 0, currentTotalBudget);
+      const currentTotalBudget2 = parseNumber(pick(row, ['ad_set_budget_applied', 'campaign_group_budget_applied']));
+      if (currentTotalBudget2 > 0) existing.totalBudget = Math.max(existing.totalBudget ?? 0, currentTotalBudget2);
 
       const currentDailyBudget = parseNumber(
-        pick(row, ['daily budget', 'daily budget (campaign level)', 'current daily', 'daily budget old', 'daily budget (before december)', 'average daily spend'])
+        // LinkedIn export: "Daily Budget"
+        pick(row, [
+          'daily budget',
+          'daily budget (campaign level)',
+          'current daily',
+          'daily budget old',
+          'daily budget (before december)',
+          'average daily spend',
+        ])
       );
       if (currentDailyBudget > 0) existing.dailyBudget = Math.max(existing.dailyBudget ?? 0, currentDailyBudget);
+      const currentDailyBudget2 = parseNumber(pick(row, ['ad_set_daily_budget_set', 'campaign_group_daily_budget_set']));
+      if (currentDailyBudget2 > 0) existing.dailyBudget = Math.max(existing.dailyBudget ?? 0, currentDailyBudget2);
 
       // Budgets (simulated baseline from "New" columns)
       const newTotal = parseNumber(
@@ -339,10 +391,13 @@ export function buildDatasetFromCsvSources(sources: CsvSource[]): CsvDataset {
   for (const acc of accByKey.values()) {
     const customerId = uuidv5(`customer:${acc.customerName}`, uuidv5.URL);
     if (!customersByName.has(acc.customerName)) {
+      const currency = (acc.currency || 'SEK').toUpperCase();
       customersByName.set(acc.customerName, {
         customer_id: customerId,
         name: acc.customerName,
-        currency: 'SEK',
+        // Keep SEK as default, but respect explicit per-row currency if present.
+        // (We intentionally do not support arbitrary currency codes elsewhere in the UI yet.)
+        currency: currency === 'EUR' || currency === 'USD' ? currency : 'SEK',
         created_at: now,
         updated_at: now,
       });
@@ -361,7 +416,9 @@ export function buildDatasetFromCsvSources(sources: CsvSource[]): CsvDataset {
     }
 
     const groupName = acc.groupName || 'Uncategorized';
-    const groupKey = `${channelId}|${groupName}`;
+    const groupKey = acc.groupExternalId
+      ? `${channelId}|ext:${acc.groupExternalId}`
+      : `${channelId}|name:${groupName}`;
     const groupId = uuidv5(`group:${groupKey}`, uuidv5.URL);
     if (!groupsByKey.has(groupKey)) {
       groupsByKey.set(groupKey, {
@@ -382,7 +439,9 @@ export function buildDatasetFromCsvSources(sources: CsvSource[]): CsvDataset {
     const totalFlightDays = Math.max(1, differenceInDays(end, start) + 1);
     const dailyBudget = acc.dailyBudget ?? (totalBudget > 0 ? totalBudget / totalFlightDays : 0);
 
-    const campaignId = uuidv5(`campaign:${groupId}|${acc.campaignName}`, uuidv5.URL);
+    const campaignId = acc.campaignExternalId
+      ? uuidv5(`campaign:${groupId}|ext:${acc.campaignExternalId}`, uuidv5.URL)
+      : uuidv5(`campaign:${groupId}|name:${acc.campaignName}`, uuidv5.URL);
 
     campaigns.push({
       campaign_id: campaignId,

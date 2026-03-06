@@ -1,7 +1,5 @@
 import Papa from 'papaparse';
 
-import googleNordcloud from '../../Copy of Budgets  - Google Nordcloud.csv?raw';
-
 export type GoogleRawRow = {
   customer: string;
   campaign: string;
@@ -26,7 +24,8 @@ function cleanNumber(value: unknown): number {
 }
 
 export function parseGoogleNordcloudRaw(): GoogleRawRow[] {
-  const parsed = Papa.parse<Record<string, string>>(googleNordcloud, {
+  // Legacy file removed; raw Google Ads data should be imported at runtime if needed.
+  const parsed = Papa.parse<Record<string, string>>('', {
     header: true,
     skipEmptyLines: 'greedy',
     dynamicTyping: false,

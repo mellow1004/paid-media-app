@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from io import StringIO
 from pathlib import Path
 from typing import Optional
 
@@ -51,9 +52,9 @@ section[data-testid="stSidebar"] > div {{
   border-right: 1px solid {BORDER};
 }}
 
-/* Remove Streamlit default top padding */
+/* Streamlit topbar can overlap first element */
 .block-container {{
-  padding-top: 1.6rem;
+  padding-top: 4.5rem;
   padding-bottom: 3rem;
 }}
 
@@ -152,13 +153,79 @@ inject_css()
 # ============================================================
 # DATA: LOAD LOCAL CSVs + FLEXIBLE SCHEMA MAPPING
 # ============================================================
-START_DATE_ALIASES = ["start_date", "start", "startdatum", "period_start", "start_date_", "startdate"]
-END_DATE_ALIASES = ["end_date", "end", "slutdatum", "period_end", "end_date_", "enddate"]
-BUDGET_ALIASES = ["total_budget", "budget", "total_budget_", "planned_spend", "lifetime_budget", "current_budget", "current_budget_total", "current_total", "assigned_budget"]
-SPENT_ALIASES = ["total_spent", "spent_to_date", "spent", "spend", "amount_spent", "cost", "current_spend", "current_budget_utilisation"]
-STATUS_ALIASES = ["status", "current_status", "off_on"]
+START_DATE_ALIASES = [
+    "start_date",
+    "start",
+    "startdatum",
+    "period_start",
+    "start_date_",
+    "startdate",
+    # New sheet (Forecasting - Mutual)
+    "ad_set_start_date",
+    "campaign_group_start_date",
+]
+END_DATE_ALIASES = [
+    "end_date",
+    "end",
+    "slutdatum",
+    "period_end",
+    "end_date_",
+    "enddate",
+    # New sheet (Forecasting - Mutual)
+    "ad_set_end_date",
+    "campaign_group_end_date",
+]
+
+# LinkedIn export: "Daily Budget" (do NOT treat as total budget)
+DAILY_BUDGET_ALIASES = [
+    "daily_budget",
+    # New sheet (Forecasting - Mutual)
+    "ad_set_daily_budget_set",
+    "campaign_group_daily_budget_set",
+]
+BUDGET_ALIASES = [
+    # Prefer ad-set budget when available, then fall back to group budget
+    "ad_set_budget_applied",
+    "campaign_group_budget_applied",
+    "total_budget",
+    "budget",
+    "total_budget_",
+    "planned_spend",
+    "lifetime_budget",
+    "current_budget",
+    "current_budget_total",
+    "current_total",
+    "assigned_budget",
+]
+SPENT_ALIASES = [
+    "ad_set_spend_to_date",
+    "campaign_group_spend_to_date",
+    "total_spent",
+    "spent_to_date",
+    "spent",
+    "spend",
+    "amount_spent",
+    "cost",
+    "current_spend",
+    "current_budget_utilisation",
+]
+STATUS_ALIASES = [
+    "ad_set_status_internal",
+    "campaign_group_status_internal",
+    "ad_set_status_platform",
+    "campaign_group_status_platform",
+    "status",
+    "current_status",
+    "off_on",
+]
 GROUP_ALIASES = ["group", "campaign_group_name", "campaign_group", "campaign_group_budget", "campaign_group_name_"]
-CAMPAIGN_ALIASES = ["campaign_name", "campaign"]
+CAMPAIGN_ALIASES = ["ad_set_name", "campaign_name", "campaign"]
+
+PLATFORM_ALIASES = ["platform"]
+ACCOUNT_ALIASES = ["account_id", "account"]
+
+# LinkedIn export: "Currency"
+CURRENCY_ALIASES = ["currency", "account_currency"]
 
 
 def normalize_colname(name: str) -> str:
@@ -183,8 +250,11 @@ def col_as_1d(df: pd.DataFrame, col: Optional[str], default: object = None) -> p
     if isinstance(sel, pd.DataFrame):
         if sel.shape[1] == 0:
             return pd.Series([default] * len(df), index=df.index)
-        return sel.iloc[:, 0].squeeze()
-    return sel.squeeze()
+        # Always return a 1D Series (never a scalar), even for single-row dataframes.
+        out = sel.iloc[:, 0]
+        return out if isinstance(out, pd.Series) else pd.Series([out] * len(df), index=df.index)
+    # Always return a 1D Series (never a scalar), even for single-row dataframes.
+    return sel if isinstance(sel, pd.Series) else pd.Series([sel] * len(df), index=df.index)
 
 
 def parse_date(series: pd.Series) -> pd.Series:
@@ -258,7 +328,13 @@ def series_to_cents(series: pd.Series) -> pd.Series:
 @st.cache_data(ttl=300)
 def load_all_csvs() -> pd.DataFrame:
     base_dir = Path(__file__).resolve().parent
-    paths = sorted(base_dir.glob("Copy of Budgets*.csv"))
+    # New source-of-truth baseline.
+    # We no longer scan for legacy "Copy of Budgets*.csv" exports.
+    paths: list[Path] = []
+    mutual = base_dir / "Forecasting - Mutual.csv"
+    if mutual.exists():
+        paths.append(mutual)
+
     if not paths:
         return pd.DataFrame()
 
@@ -274,7 +350,18 @@ def load_all_csvs() -> pd.DataFrame:
 
 def read_csv_with_header_detection(path: Path) -> pd.DataFrame:
     text = path.read_text(encoding="utf-8", errors="replace")
-    lines = text.splitlines()
+    df = read_csv_text_with_header_detection(text)
+    df = df.dropna(axis=1, how="all")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def read_csv_text_with_header_detection(text: str) -> pd.DataFrame:
+    """
+    Read CSV text and detect the header row (first non-empty, comma-containing line with letters).
+    This mirrors how many of the provided CSV exports include leading blank rows.
+    """
+    lines = str(text).splitlines()
     header_idx = 0
     for i, line in enumerate(lines):
         if line.strip() == "" or set(line.strip()) <= {","}:
@@ -282,10 +369,45 @@ def read_csv_with_header_detection(path: Path) -> pd.DataFrame:
         if "," in line and re.search(r"[A-Za-z]", line):
             header_idx = i
             break
-    df = pd.read_csv(path, skiprows=header_idx, header=0)
-    df = df.dropna(axis=1, how="all")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
+    return pd.read_csv(StringIO(text), skiprows=header_idx, header=0)
+
+
+def load_uploaded_csvs(uploaded_files, platform_by_filename: Optional[dict[str, str]] = None) -> pd.DataFrame:
+    """
+    Parse uploaded Streamlit CSV files and return a concatenated dataframe.
+    Additive: these rows will later be appended to the locally discovered CSVs.
+    """
+    if not uploaded_files:
+        return pd.DataFrame()
+
+    frames: list[pd.DataFrame] = []
+    for uf in uploaded_files:
+        try:
+            # Streamlit UploadedFile supports .getvalue()
+            raw = uf.getvalue()
+            if isinstance(raw, bytes):
+                text = raw.decode("utf-8", errors="replace")
+            else:
+                text = str(raw)
+            df = read_csv_text_with_header_detection(text)
+            filename = getattr(uf, "name", "uploaded.csv")
+            df["__source_file"] = filename
+
+            # Platform confirmation step (required): stamp every row with the user-confirmed platform.
+            # This avoids unreliable inference from filenames/keywords and prevents everything being "Other".
+            if platform_by_filename and filename in platform_by_filename:
+                df["platform"] = platform_by_filename[filename]
+            frames.append(df)
+        except Exception:
+            # Keep going even if one file fails to parse
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+    combined = drop_duplicate_header_rows(combined)
+    return combined
 
 
 def drop_duplicate_header_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -329,6 +451,18 @@ def infer_platform(text_series: pd.Series) -> pd.Series:
     return platform
 
 
+def map_platform_explicit(platform_series: pd.Series) -> pd.Series:
+    """
+    Map explicit platform column values to our internal channel names.
+    """
+    t = platform_series.astype(str).str.lower().fillna("")
+    out = pd.Series(["Other"] * len(t), index=t.index, dtype="string")
+    out[t.str.contains("linkedin", na=False)] = "LinkedIn"
+    out[t.str.contains("google", na=False)] = "Google"
+    out[t.str.contains("meta|facebook|instagram", na=False)] = "Meta"
+    return out
+
+
 def build_internal_table(raw: pd.DataFrame) -> pd.DataFrame:
     """
     Output columns:
@@ -343,9 +477,13 @@ def build_internal_table(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
     df = df.rename(columns={c: normalize_colname(c) for c in df.columns})
 
+    platform_col = first_existing_col(df, PLATFORM_ALIASES)
+    account_col = first_existing_col(df, ACCOUNT_ALIASES)
+    currency_col = first_existing_col(df, CURRENCY_ALIASES)
     group_col = first_existing_col(df, GROUP_ALIASES)
     camp_col = first_existing_col(df, CAMPAIGN_ALIASES)
     budget_col = first_existing_col(df, BUDGET_ALIASES)
+    daily_budget_col = first_existing_col(df, DAILY_BUDGET_ALIASES)
     spent_col = first_existing_col(df, SPENT_ALIASES)
     status_col = first_existing_col(df, STATUS_ALIASES)
     start_col = first_existing_col(df, START_DATE_ALIASES)
@@ -353,37 +491,47 @@ def build_internal_table(raw: pd.DataFrame) -> pd.DataFrame:
 
     group_path = col_as_1d(df, group_col, default="")
     campaign = col_as_1d(df, camp_col, default="")
+    platform_raw = col_as_1d(df, platform_col, default="")
+    account_raw = col_as_1d(df, account_col, default="")
+    currency_raw = col_as_1d(df, currency_col, default="")
     budget_raw = col_as_1d(df, budget_col, default=0)
+    daily_budget_raw = col_as_1d(df, daily_budget_col, default=0)
     spent_raw = col_as_1d(df, spent_col, default=0)
     status_raw = col_as_1d(df, status_col, default="")
     start_raw = col_as_1d(df, start_col, default=None)
     end_raw = col_as_1d(df, end_col, default=None)
 
     # Flatten + validate types
-    today_d = pd.Timestamp.today().date()
-    start_date = parse_date(start_raw).fillna(today_d)
-    end_date = parse_date(end_raw).fillna(today_d)
+    start_date = parse_date(start_raw)
+    end_date = parse_date(end_raw)
 
     total_budget_cents = series_to_cents(budget_raw)
+    daily_budget_set_cents = series_to_cents(daily_budget_raw)
     total_spent_cents = series_to_cents(spent_raw)
 
     # Hierarchy: use Group to extract customer/channel-ish, then infer platform from combined text
     hier = split_hierarchy_from_group(group_path)
     combined_text = group_path.astype(str) + " " + campaign.astype(str)
-    channel = infer_platform(combined_text)
+    channel = map_platform_explicit(platform_raw) if platform_col else infer_platform(combined_text)
+
+    # Prefer explicit account_id for customer when provided, otherwise fallback to hierarchy extraction
+    customer = account_raw.astype(str).fillna("").replace("nan", "")
+    customer = customer.where(customer.str.strip() != "", hier["customer"].astype(str).fillna(""))
 
     out = pd.DataFrame(
         {
-            "customer": hier["customer"].astype(str).fillna(""),
+            "customer": customer,
             "industry": hier["industry"].astype(str).fillna(""),
             "program": hier["program"].astype(str).fillna(""),
             "channel": channel.astype(str).fillna("Other"),
+            "currency": currency_raw.astype(str).fillna(""),
             "group": group_path.astype(str).fillna(""),
             "campaign": campaign.astype(str).fillna(""),
             "status": status_raw.astype(str).fillna(""),
             "start_date": start_date,
             "end_date": end_date,
             "total_budget_cents": total_budget_cents,
+            "daily_budget_set_cents": daily_budget_set_cents,
             "total_spent_cents": total_spent_cents,
             "source_file": col_as_1d(df, "__source_file", default="").astype(str),
         }
@@ -397,10 +545,58 @@ def build_internal_table(raw: pd.DataFrame) -> pd.DataFrame:
     mask_total = out["group"].apply(is_totalish) | out["campaign"].apply(is_totalish)
     out = out.loc[~mask_total].copy()
 
+    # Drop rows with no identifiable group/campaign after mapping
+    out = out.loc[~((out["group"].str.strip() == "") & (out["campaign"].str.strip() == ""))].copy()
+
     # If campaign empty, use group as a fallback label
     out.loc[out["campaign"].str.strip() == "", "campaign"] = out["group"]
 
     return out
+
+
+def validate_internal_table(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Validation gate before calculations.
+    If required base values are missing/invalid, we flag rows and exclude them from KPIs/metrics.
+    Required:
+      - total_budget_cents > 0
+      - start_date and end_date parseable, and end_date >= start_date
+      - total_spent_cents >= 0
+    """
+    if df.empty:
+        return df
+
+    start_dt = pd.to_datetime(df["start_date"], errors="coerce")
+    end_dt = pd.to_datetime(df["end_date"], errors="coerce")
+
+    budget_invalid = df["total_budget_cents"].astype("int64") <= 0
+    spend_invalid = df["total_spent_cents"].astype("int64") < 0
+    dates_invalid = start_dt.isna() | end_dt.isna() | (end_dt < start_dt)
+
+    is_valid = ~(budget_invalid | spend_invalid | dates_invalid)
+
+    def build_error(i: int) -> str:
+        errs: list[str] = []
+        if bool(budget_invalid.iloc[i]):
+            errs.append("Missing/invalid budget")
+        if bool(spend_invalid.iloc[i]):
+            errs.append("Missing/invalid spend")
+        if bool(dates_invalid.iloc[i]):
+            errs.append("Missing/invalid dates")
+        return ", ".join(errs)
+
+    out = df.copy()
+    out["is_valid"] = is_valid.astype("bool")
+    out["validation_error"] = [build_error(i) if not bool(is_valid.iloc[i]) else "" for i in range(len(df))]
+    return out
+
+
+def split_valid_invalid(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or "is_valid" not in df.columns:
+        return df, pd.DataFrame()
+    valid = df.loc[df["is_valid"] == True].copy()  # noqa: E712
+    invalid = df.loc[df["is_valid"] != True].copy()
+    return valid, invalid
 
 
 # ============================================================
@@ -487,6 +683,17 @@ def compute_daily_budget_cents(df: pd.DataFrame) -> pd.Series:
     """
     dailyBudget = totalBudget / activeDays
     """
+    if "daily_budget_set_cents" in df.columns:
+        set_daily = df["daily_budget_set_cents"].astype("int64")
+        mask = set_daily > 0
+        out = pd.Series([0.0] * len(df), index=df.index, dtype="float64")
+        out.loc[mask] = set_daily.loc[mask].astype("float64")
+        if (~mask).any():
+            active_days = compute_active_days(df.loc[~mask])
+            budget = df.loc[~mask, "total_budget_cents"].astype("int64")
+            out.loc[~mask] = (budget / active_days).astype("float64")
+        return out
+
     active_days = compute_active_days(df)
     budget = df["total_budget_cents"].astype("int64")
     return (budget / active_days).astype("float64")
@@ -743,15 +950,65 @@ def progress_row(label: str, ratio: float, right: str, color: str = BV_RED):
 # ============================================================
 # LOAD DATA
 # ============================================================
-raw = load_all_csvs()
-if raw.empty:
-    st.error("No local CSV files found. Add files like `Copy of Budgets  - Sheet4.csv` to this folder.")
-    st.stop()
+if "csv_uploader_key" not in st.session_state:
+    st.session_state.csv_uploader_key = 0
 
-data = build_internal_table(raw)
-if data.empty:
-    st.error("Could not map your CSVs into the internal schema. Make sure at least one file has a Group/Campaign Group column.")
-    st.stop()
+with st.expander("Import CSV (additive)", expanded=False):
+    st.caption(
+        "Baseline: **Forecasting - Mutual.csv**. Upload one or multiple CSV files to add them on top (additive)."
+    )
+    uploaded_files = st.file_uploader(
+        "Upload CSV files",
+        type=["csv"],
+        accept_multiple_files=True,
+        key=f"csv_uploader_{st.session_state.csv_uploader_key}",
+    )
+    platform_by_filename: dict[str, str] = {}
+    needs_platform_confirmation = False
+    if uploaded_files:
+        st.markdown("**Confirm platform per file (required)**")
+        st.caption("We do not guess platform from filenames/keywords. Each uploaded CSV is stamped with your selection.")
+        for uf in uploaded_files:
+            fname = getattr(uf, "name", "uploaded.csv")
+            choice = st.selectbox(
+                f"Platform for {fname}",
+                options=["Select…", "LinkedIn", "Google", "Meta"],
+                index=0,
+                key=f"platform_for_{fname}",
+            )
+            if choice == "Select…":
+                needs_platform_confirmation = True
+            else:
+                platform_by_filename[fname] = choice
+    cols = st.columns([1, 1, 2])
+    with cols[0]:
+        st.metric("Uploaded files", 0 if not uploaded_files else len(uploaded_files))
+    with cols[1]:
+        if st.button("Clear uploads", use_container_width=True):
+            st.session_state.csv_uploader_key += 1
+            st.rerun()
+    with cols[2]:
+        if uploaded_files:
+            st.write(", ".join([f.name for f in uploaded_files[:6]]) + ("" if len(uploaded_files) <= 6 else f" … +{len(uploaded_files)-6} more"))
+
+raw = load_all_csvs()
+if uploaded_files and needs_platform_confirmation:
+    st.warning("Select a platform for every uploaded CSV to import it.")
+    uploaded_raw = pd.DataFrame()
+else:
+    uploaded_raw = load_uploaded_csvs(uploaded_files, platform_by_filename=platform_by_filename)
+frames = [df for df in [raw, uploaded_raw] if df is not None and not df.empty]
+if frames:
+    raw = pd.concat(frames, ignore_index=True, sort=False)
+    raw = drop_duplicate_header_rows(raw)
+else:
+    raw = pd.DataFrame()
+
+data = build_internal_table(raw) if not raw.empty else pd.DataFrame()
+data = validate_internal_table(data) if not data.empty else data
+
+def empty_state():
+    st.info("No CSV data loaded yet. Use **Import CSV (additive)** above to upload one or more CSV files to begin.")
 
 
 # ============================================================
@@ -796,7 +1053,9 @@ with st.sidebar:
     st.markdown("---")
 
     # Global filters for Budget Overview
-    customers = ["All"] + sorted([c for c in data["customer"].unique().tolist() if str(c).strip() != ""])
+    customers = ["All"]
+    if not data.empty and "customer" in data.columns:
+        customers = ["All"] + sorted([c for c in data["customer"].unique().tolist() if str(c).strip() != ""])
     channels = ["All", "LinkedIn", "Google", "Meta", "Other"]
     selected_customer = st.selectbox("Customer", options=customers, index=0)
     selected_channel = st.selectbox("Channel", options=channels, index=0)
@@ -820,7 +1079,7 @@ with st.sidebar:
 
 
 # Apply filters
-filtered = data.copy()
+filtered = data.copy() if not data.empty else pd.DataFrame()
 if selected_customer != "All":
     filtered = filtered.loc[filtered["customer"] == selected_customer].copy()
 if selected_channel != "All":
@@ -834,11 +1093,24 @@ def page_budget_overview(df: pd.DataFrame):
     st.markdown("## Budget Overview")
     st.markdown('<div class="bv-muted">Overview of budgets, spend and allocation across channels.</div>', unsafe_allow_html=True)
 
+    if df.empty:
+        empty_state()
+        return
+
+    valid_df, invalid_df = split_valid_invalid(df)
+    if not invalid_df.empty:
+        st.warning(
+            f"{len(invalid_df)} rows are missing valid budget/spend/dates and are excluded from calculations."
+        )
+        with st.expander("Show excluded rows"):
+            show_cols = [c for c in ["source_file", "channel", "group", "campaign", "start_date", "end_date", "total_budget_cents", "total_spent_cents", "validation_error"] if c in invalid_df.columns]
+            st.dataframe(invalid_df.loc[:, show_cols], use_container_width=True, hide_index=True)
+
     # KPIs
-    total_budget = int(df["total_budget_cents"].sum())
-    total_spent = int(df["total_spent_cents"].sum())
-    active_customers = int(df["customer"].replace("", pd.NA).dropna().nunique())
-    active_channels = int(df["channel"].replace("", pd.NA).dropna().nunique())
+    total_budget = int(valid_df["total_budget_cents"].sum())
+    total_spent = int(valid_df["total_spent_cents"].sum())
+    active_customers = int(valid_df["customer"].replace("", pd.NA).dropna().nunique())
+    active_channels = int(valid_df["channel"].replace("", pd.NA).dropna().nunique())
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -855,7 +1127,7 @@ def page_budget_overview(df: pd.DataFrame):
     left, right = st.columns([1, 1])
 
     # Donut: allocation by channel
-    alloc = df.groupby("channel", dropna=False)["total_budget_cents"].sum().reindex(["LinkedIn", "Google", "Meta", "Other"]).fillna(0).reset_index()
+    alloc = valid_df.groupby("channel", dropna=False)["total_budget_cents"].sum().reindex(["LinkedIn", "Google", "Meta", "Other"]).fillna(0).reset_index()
     alloc["value"] = alloc["total_budget_cents"].apply(lambda c: float(Decimal(int(c)) / Decimal(100)))
     donut_values = [{"label": r["channel"], "value": r["value"]} for _, r in alloc.iterrows() if r["value"] > 0]
 
@@ -873,7 +1145,7 @@ def page_budget_overview(df: pd.DataFrame):
         st.markdown("</div>", unsafe_allow_html=True)
 
     # HBar: customer budget vs spend
-    cust = df.groupby("customer", dropna=False)[["total_budget_cents", "total_spent_cents"]].sum().reset_index()
+    cust = valid_df.groupby("customer", dropna=False)[["total_budget_cents", "total_spent_cents"]].sum().reset_index()
     cust = cust[cust["customer"].astype(str).str.strip() != ""].sort_values("total_budget_cents", ascending=False).head(12)
     hbar_vals: list[dict] = []
     for _, r in cust.iterrows():
@@ -894,7 +1166,7 @@ def page_budget_overview(df: pd.DataFrame):
     st.markdown("##")
     
     # Customer-level hierarchy metrics
-    customer_metrics = compute_customer_metrics(df)
+    customer_metrics = compute_customer_metrics(valid_df)
     customer_metrics = customer_metrics[customer_metrics["customer"].str.strip() != ""].sort_values("total_spent_cents", ascending=False).head(8)
     
     if not customer_metrics.empty:
@@ -912,7 +1184,7 @@ def page_budget_overview(df: pd.DataFrame):
     st.markdown("##")
 
     # Use hierarchical channel metrics
-    channel_metrics = compute_channel_metrics(df)
+    channel_metrics = compute_channel_metrics(valid_df)
     channel_metrics = channel_metrics.sort_values("total_spent_cents", ascending=False)
     
     colors = {"LinkedIn": BV_RED, "Google": "#2563EB", "Meta": "#9333EA", "Other": "#94A3B8"}
@@ -931,16 +1203,29 @@ def page_spend_tracking(df: pd.DataFrame):
     st.markdown("## Spend Tracking")
     st.markdown('<div class="bv-muted">Campaign-level spend, forecast and utilization with alerts.</div>', unsafe_allow_html=True)
 
+    if df.empty:
+        empty_state()
+        return
+
+    valid_df, invalid_df = split_valid_invalid(df)
+    if not invalid_df.empty:
+        st.warning(
+            f"{len(invalid_df)} rows are missing valid budget/spend/dates and are excluded from campaign calculations."
+        )
+        with st.expander("Show excluded rows"):
+            show_cols = [c for c in ["source_file", "channel", "group", "campaign", "start_date", "end_date", "total_budget_cents", "total_spent_cents", "validation_error"] if c in invalid_df.columns]
+            st.dataframe(invalid_df.loc[:, show_cols], use_container_width=True, hide_index=True)
+
     # Build campaign table using enhanced metrics
     campaigns_agg = (
-        df.groupby(["channel", "campaign", "group"], dropna=False)[["total_budget_cents", "total_spent_cents"]]
+        valid_df.groupby(["channel", "campaign", "group"], dropna=False)[["total_budget_cents", "total_spent_cents"]]
         .sum()
         .reset_index()
     )
     
     # Join dates/status (best-effort)
     meta = (
-        df.groupby(["channel", "campaign", "group"], dropna=False)[["start_date", "end_date", "status"]]
+        valid_df.groupby(["channel", "campaign", "group"], dropna=False)[["start_date", "end_date", "status"]]
         .agg({"start_date": "min", "end_date": "max", "status": "last"})
         .reset_index()
     )
@@ -1074,8 +1359,18 @@ def page_simulation(df: pd.DataFrame):
     st.markdown("## Simulation")
     st.markdown('<div class="bv-muted">Adjust budgets by platform and compare allocation.</div>', unsafe_allow_html=True)
 
+    if df.empty:
+        empty_state()
+        return
+
+    valid_df, invalid_df = split_valid_invalid(df)
+    if not invalid_df.empty:
+        st.warning(
+            f"{len(invalid_df)} rows are missing valid budget/spend/dates and are excluded from simulation totals."
+        )
+
     # Get channel metrics for base values
-    channel_metrics = compute_channel_metrics(df)
+    channel_metrics = compute_channel_metrics(valid_df)
     base = channel_metrics.set_index("channel")["total_budget_cents"].reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
     base_spend = channel_metrics.set_index("channel")["total_spent_cents"].reindex(["LinkedIn", "Google", "Meta"]).fillna(0).astype("int64").to_dict()
 
@@ -1227,7 +1522,13 @@ def page_settings():
     
     st.markdown("###")
     st.markdown("### Data Source")
-    st.markdown('<div class="bv-card"><div class="bv-kpi-label">CSV Files</div><div style="font-weight:700; margin-top:6px;">Local files: <code>Copy of Budgets*.csv</code></div><div class="bv-muted" style="margin-top:8px; font-size:13px;">All calculations are performed in real-time from these files</div></div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="bv-card"><div class="bv-kpi-label">CSV Files</div>'
+        '<div style="font-weight:700; margin-top:6px;">Baseline: <code>Forecasting - Mutual.csv</code></div>'
+        '<div class="bv-muted" style="margin-top:8px; font-size:13px;">Uploads are additive and are stamped with your confirmed platform</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
     
     st.markdown("###")
     st.markdown("### Business Logic")

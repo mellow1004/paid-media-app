@@ -75,7 +75,7 @@ export function GoogleAdsAdsPage() {
         <CardContent className="p-0">
           {rows.length === 0 ? (
             <div className="p-6 text-sm text-muted-foreground">
-              No matching rows found in `Copy of Budgets  - Google Nordcloud.csv` for this campaign.
+              No matching Google raw rows found for this campaign. Import raw Google data to enable ads-level metrics.
             </div>
           ) : (
             <div className="overflow-x-auto">

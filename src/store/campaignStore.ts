@@ -17,6 +17,7 @@ import { mergeCampaign, mergeSimulationBaselines } from '../data/mergeDatasets';
 interface CampaignStore {
   // Data
   campaigns: Campaign[];
+  invalidCampaigns: Campaign[];
   pauseWindows: PauseWindow[];
   alerts: Alert[];
 
@@ -58,6 +59,16 @@ interface CampaignStore {
   // CSV upload integration
   mergeInDataset: (added: CsvDataset) => void;
   resetToBaseDataset: () => void;
+}
+
+function isValidCampaignForCalculations(c: Campaign): { ok: boolean; reason?: string } {
+  if (!Number.isFinite(c.total_budget) || c.total_budget <= 0) return { ok: false, reason: 'Missing/invalid total budget' };
+  const start = new Date(c.start_date);
+  const end = new Date(c.end_date);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return { ok: false, reason: 'Missing/invalid dates' };
+  if (end.getTime() < start.getTime()) return { ok: false, reason: 'End date is before start date' };
+  if (!Number.isFinite(c.actual_spend) || c.actual_spend < 0) return { ok: false, reason: 'Missing/invalid spend' };
+  return { ok: true };
 }
 
 function buildAlertsForCampaigns(campaigns: Campaign[]): Alert[] {
@@ -107,9 +118,14 @@ export const useCampaignStore = create<CampaignStore>()(
   persist(
     (set, get) => ({
       // Initialize with CSV-built data
-      campaigns: dataset.campaigns.map(c => ({ ...c })),
+      campaigns: dataset.campaigns
+        .map(c => ({ ...c }))
+        .filter((c) => isValidCampaignForCalculations(c).ok),
+      invalidCampaigns: dataset.campaigns
+        .map(c => ({ ...c }))
+        .filter((c) => !isValidCampaignForCalculations(c).ok),
       pauseWindows: [],
-      alerts: buildAlertsForCampaigns(dataset.campaigns),
+      alerts: buildAlertsForCampaigns(dataset.campaigns.filter((c) => isValidCampaignForCalculations(c).ok)),
       simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
       
       getCampaign: (campaignId: string) => {
@@ -341,8 +357,16 @@ export const useCampaignStore = create<CampaignStore>()(
 
       mergeInDataset: (added) => {
         const baseCampaigns = get().campaigns;
+        const baseInvalid = get().invalidCampaigns;
         const map = new Map<string, Campaign>(baseCampaigns.map(c => [c.campaign_id, c]));
+        const invalidNext: Campaign[] = [...baseInvalid];
+
         for (const c of added.campaigns) {
+          const validity = isValidCampaignForCalculations(c);
+          if (!validity.ok) {
+            invalidNext.push(c);
+            continue;
+          }
           const existing = map.get(c.campaign_id);
           map.set(c.campaign_id, existing ? mergeCampaign(existing, c) : c);
         }
@@ -352,6 +376,7 @@ export const useCampaignStore = create<CampaignStore>()(
 
         set({
           campaigns: mergedCampaigns,
+          invalidCampaigns: invalidNext,
           simulationByCampaignId: mergedBaselines,
           alerts: buildAlertsForCampaigns(mergedCampaigns),
         });
@@ -359,10 +384,15 @@ export const useCampaignStore = create<CampaignStore>()(
 
       resetToBaseDataset: () => {
         set({
-          campaigns: dataset.campaigns.map(c => ({ ...c })),
+          campaigns: dataset.campaigns
+            .map(c => ({ ...c }))
+            .filter((c) => isValidCampaignForCalculations(c).ok),
+          invalidCampaigns: dataset.campaigns
+            .map(c => ({ ...c }))
+            .filter((c) => !isValidCampaignForCalculations(c).ok),
           pauseWindows: [],
           simulationByCampaignId: { ...dataset.simulationBaselinesByCampaignId },
-          alerts: buildAlertsForCampaigns(dataset.campaigns),
+          alerts: buildAlertsForCampaigns(dataset.campaigns.filter((c) => isValidCampaignForCalculations(c).ok)),
         });
       },
     }),
@@ -379,6 +409,7 @@ export const useCampaignStore = create<CampaignStore>()(
       }),
       partialize: (state) => ({
         campaigns: state.campaigns,
+        invalidCampaigns: state.invalidCampaigns,
         pauseWindows: state.pauseWindows,
         alerts: state.alerts,
         simulationByCampaignId: state.simulationByCampaignId,
@@ -387,6 +418,13 @@ export const useCampaignStore = create<CampaignStore>()(
         // Extra safety: ensure all dates are proper Date objects after rehydration
         if (state) {
           state.campaigns = state.campaigns.map(c => ({
+            ...c,
+            start_date: new Date(c.start_date),
+            end_date: new Date(c.end_date),
+            created_at: new Date(c.created_at),
+            updated_at: new Date(c.updated_at),
+          }));
+          state.invalidCampaigns = (state.invalidCampaigns ?? []).map(c => ({
             ...c,
             start_date: new Date(c.start_date),
             end_date: new Date(c.end_date),
